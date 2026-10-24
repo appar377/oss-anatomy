@@ -38,6 +38,8 @@ npm run build
 
 VercelのFramework PresetはNext.js、Output Directoryは標準値のままにします。`out` を上書き指定すると、Next.jsのビルド用manifestの探索先と衝突します。
 
+ビルド済みHTMLをローカルで確認する場合は、Python 3がある環境で `python3 -m http.server 3104 --directory out` を使えます。静的書き出しのため `next start` は使用しません。
+
 ## 構成
 
 | 場所 | 内容 |
