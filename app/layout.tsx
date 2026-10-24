@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Navigation, Footer } from "@/components/navigation";
 import "./globals.css";
 export const metadata: Metadata = {
-  metadataBase: new URL("https://oss-anatomy.vercel.app"),
+  metadataBase: new URL("https://oss-kaibougaku.vercel.app"),
   title: {
     default: "OSS解剖学 — コードをたどる。設計が見える。",
     template: "%s | OSS解剖学",

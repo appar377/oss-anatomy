@@ -17,5 +17,5 @@ export default function sitemap(): MetadataRoute.Sitemap {
       ...d.chapters.map((c) => `oss/${d.id}/${c.id}/`),
     ]),
     ...getNotes().map((n) => n.href.slice(1)),
-  ].map((path) => ({ url: `https://oss-anatomy.vercel.app/${path}` }));
+  ].map((path) => ({ url: `https://oss-kaibougaku.vercel.app/${path}` }));
 }

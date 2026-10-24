@@ -2,6 +2,8 @@
 
 コードをたどる。設計が見える。
 
+公開サイト: [oss-kaibougaku.vercel.app](https://oss-kaibougaku.vercel.app/)
+
 React・Rails・Devise・RSpecを、固定した版のソースとともに読む「OSS図書館＋解剖室」です。Orifolioから独立して、本文・画像・図解・検索索引をこのリポジトリで保持します。
 
 ## 読書の流れ
@@ -33,6 +35,8 @@ npm run build
 ```
 
 `http://localhost:3104` で開きます。Next.js App Routerで静的書き出しし、ビルド結果は `out/` です。Vercelは独立プロジェクトへGit接続して公開します。環境変数・DB・APIキーは不要です。
+
+VercelのFramework PresetはNext.js、Output Directoryは標準値のままにします。`out` を上書き指定すると、Next.jsのビルド用manifestの探索先と衝突します。
 
 ## 構成
 
