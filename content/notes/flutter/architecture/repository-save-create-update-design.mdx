@@ -1,0 +1,108 @@
+---
+title: "IDの有無でPOSTとPUTを切り替えるsaveメソッドは良い設計か"
+description: "IDだけで新規作成と更新を切り替える前に、入力・権限・競合時の扱いを比べる。明示メソッドとCommand型で操作を表す例を示す。"
+date: 2026-07-20
+tags:
+  - "Flutter"
+  - "Repository"
+  - "Api Design"
+  - "Create"
+  - "Update"
+category: "Flutter"
+level: 2
+articleType: reference
+draft: false
+thumbnail: "/images/articles/repository-save-create-update-design.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+`save(project)`の内部で「IDがなければ作成、あれば更新」と分岐すると、呼び出しは短くなります。ただし、端末で仮のIDを付けた下書きまで、サーバーに保存済みとは限りません。
+
+一つにまとめる前に、作成と更新で必要な入力、失敗したときの扱い、操作の権限が同じかを確かめます。この記事ではHTTPの仕様とアプリ側の操作を分け、Dart SDK 3.11.5のメモリ内テストで分岐と失敗を確認します。実サーバーへの通信は行っていません。
+
+## POSTとPUTは、createとupdateの別名ではない
+
+HTTPのPUTは、指定したリソースの状態を作成または置き換える要求です。対象がまだ存在しない場合の作成も仕様に含まれます。POSTは対象リソース固有の処理を要求するため、新規作成だけに限定されません。[RFC 9110のPOST・PUT](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.3)
+
+部分的な変更を表すPATCHにも、適用する変更形式などの契約が必要です。PUTとPATCHを、便利そうな方へ置き換えることはできません。[RFC 5789](https://www.rfc-editor.org/rfc/rfc5789.html#section-2)
+
+そのため、Repositoryのメソッド名を決めるときは、まずアプリが行う操作を定義し、その後で実APIに対応付けます。以下では、作成と名前の変更を別の操作にしています。
+
+## 入力が違うなら、メソッドと型を分ける
+
+```dart
+final class Project {
+  const Project(this.id, this.name, this.version);
+  final String id;
+  final String name;
+  final int version;
+}
+
+final class CreateProjectInput {
+  const CreateProjectInput(this.name);
+  final String name;
+}
+
+final class RenameProjectInput {
+  const RenameProjectInput(this.name, {required this.expectedVersion});
+  final String name;
+  final int expectedVersion;
+}
+
+abstract interface class ProjectRepository {
+  Future<Project> create(CreateProjectInput input);
+  Future<Project> rename(String id, RenameProjectInput input);
+}
+```
+
+新規作成には名前を渡し、更新には対象のIDと、どのversionを見て変更したかを渡します。表示用のEntityへnullableなIDや更新用の仮状態をすべて詰め込む必要がなくなります。ここでの`rename`をPOST・PUT・PATCHのどれへ対応させるかは、この型だけからは決まりません。
+
+Flutterのアーキテクチャガイドも、RepositoryとServiceの入力・出力を明確にすることを勧めています。ただし、上のメソッド構成はこの記事の例であり、Flutterが固定のAPI名を要求しているわけではありません。[Data layerの説明](https://docs.flutter.dev/app-architecture/guide#data-layer)
+
+## IDがある場合の失敗を、先に確かめる
+
+メモリ内の検証では、次の条件を独立して確認しました。
+
+| 条件 | 検証結果 |
+| --- | --- |
+| 未保存の`local-draft`というIDを、ID分岐のsaveへ渡す | 更新側を呼び、対象なしで失敗した |
+| IDなしで作成し、返されたIDで名前を変更する | 作成→更新の順に呼び、名前が変わった |
+| version 1を見た二つの更新のうち、先の更新だけを適用する | 後から届いた古いversionの更新を拒否し、先の変更を維持した |
+| 対象のIDは存在するが、テスト用Repositoryの書込み許可を外す | 更新を拒否し、元の値を維持した |
+
+これはテスト用のfakeが定義した契約です。実サービスで同じ制約を守るには、サーバー側の認可や競合検査も必要です。クライアントがIDを持つことは、その対象を更新する権限の証明にはなりません。
+
+version比較も、クライアントだけで完結させてはいけません。HTTPで競合を扱う方法の一つに、ETagと`If-Match`による条件付き要求があります。サーバーが条件を評価して変更を適用する仕組みと合わせます。[RFC 9110のIf-Match](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.1)
+
+## 一つの入口が必要なら、操作をCommandへ残す
+
+呼び出し側が操作をキューへ入れるなど、一つの入口が都合よい場面もあります。その場合でも、IDの有無から操作を推測せず、選んだ操作を型として渡せます。先ほどの型へ次を追加します。
+
+```dart
+sealed class ProjectWrite {
+  const ProjectWrite();
+}
+final class CreateProject extends ProjectWrite {
+  const CreateProject(this.input);
+  final CreateProjectInput input;
+}
+final class RenameProject extends ProjectWrite {
+  const RenameProject(this.id, this.input);
+  final String id;
+  final RenameProjectInput input;
+}
+
+Future<Project> execute(
+  ProjectRepository repository,
+  ProjectWrite command,
+) => switch (command) {
+  CreateProject(:final input) => repository.create(input),
+  RenameProject(:final id, :final input) => repository.rename(id, input),
+};
+```
+
+この例でも、戻り値は作成・更新後の`Project`です。対象なし、権限不足、競合を同じnullに丸めると呼び出し側が判断できないため、利用するAPIに応じて区別できるエラーの契約を設けます。Commandを使っただけで再試行や永続キューが実装されるわけではありません。
+
+`save`が常に悪いわけではありません。たとえば、呼び出し側が「この状態を保存する」とだけ指定でき、作成・更新の違いが契約として隠れてよい仕組みなら、一つの入口は自然です。入力、許可、競合、再試行の意味が分かれるなら、その違いをメソッド名か型に残す方が読み取りやすくなります。

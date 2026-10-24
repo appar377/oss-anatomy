@@ -1,0 +1,190 @@
+---
+title: "Swiftのnonisolatedは何を隔離から外すのか"
+description: "actorの可変状態と不変値を分け、同期プロトコルへの適合、MainActor、Swift 6.2以降の非同期関数の隔離を小さな例で確認します。"
+date: 2026-07-20
+tags:
+  - "Swift"
+  - "Concurrency"
+  - "Actor"
+  - "Nonisolated"
+  - "Swift 6"
+category: "Swift"
+level: 3
+articleType: internal
+draft: false
+thumbnail: "/images/articles/swift-nonisolated-actor-isolation.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+`nonisolated`を付ける前に確かめたいのは、「この処理は、どの状態を読むのか」です。actorの可変状態を読むなら、そのactorの隔離に従います。引数や共有してよい不変値だけで完結するなら、隔離外から呼べるメンバーに分けられます。
+
+たとえば、キャッシュの中身を数える処理と、キャッシュの名前を表示する処理では必要な保護が違います。同期プロトコルへの適合、`@MainActor`との関係、Swift 6.2以降の非同期関数の設定を、この違いから整理します。
+
+## 同じactorのメソッドなのに、なぜawaitの要否が違うのですか？
+
+次の`UserStore`では、辞書`users`の読み書きをactor内に閉じ込めています。`update`や`count`の宣言に`async`はありませんが、別の隔離領域から呼ぶときはactorへアクセスするために`await`が必要です。同じactorの隔離内から呼ぶ場合とは条件が違います。[SE-0306: Actors](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0306-actors.md)
+
+`description`は辞書を読みません。不変で`Sendable`な`String`の`label`だけから表示を作るため、`nonisolated`として同期的に呼べます。`CustomStringConvertible`の同期的な要求にも、このメンバーで適合します。[SE-0313: Improved control over actor isolation](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0313-actor-isolation-control.md)
+
+```swift file=nonisolated/UserStore.swift
+actor UserStore: CustomStringConvertible {
+    nonisolated let label: String
+    private var users: [Int: String] = [:]
+
+    init(label: String) {
+        self.label = label
+    }
+
+    nonisolated var description: String {
+        "UserStore(\(label))"
+    }
+
+    func update(id: Int, name: String) {
+        users[id] = name
+    }
+
+    func name(for id: Int) -> String? {
+        users[id]
+    }
+
+    func count() -> Int {
+        users.count
+    }
+}
+
+@MainActor
+final class UserScreenState {
+    private(set) var selectedName = ""
+
+    func select(_ name: String) {
+        selectedName = name
+    }
+
+    nonisolated static func greeting(_ name: String) -> String {
+        "Hello, \(name)"
+    }
+}
+```
+
+後半の`UserScreenState`は`MainActor`に隔離した画面用の状態です。`select`はその状態を変更します。一方、`greeting`は引数だけを整形するので、`nonisolated`にしても画面の可変状態には触れません。
+
+ここでの`nonisolated`は「保護された状態に自由にアクセスできる」という指定ではありません。隔離が必要な状態に依存しないメンバーとして切り出す指定です。また、同期メソッドに付けても、バックグラウンド処理を起動する仕組みにはなりません。
+
+## コンパイルエラーを消すために付けてもよいですか？
+
+辞書の読み取りにも隔離が必要です。次は意図的にコンパイルエラーにする例で、正常なソース群とは分けて保存します。
+
+```swift expected-diagnostic file=expected-diagnostics/MutableActorState.swift
+actor BrokenStore {
+    private var users: [Int: String] = [:]
+
+    nonisolated func countSynchronously() -> Int {
+        users.count
+    }
+}
+```
+
+確認する診断は、`users`がactorに隔離された可変状態なのに、`nonisolated`なメソッドから読んでいるという点です。「読み取りだから安全」とは扱いません。更新と同時に読む可能性があるためです。
+
+次の例も別ファイルで診断を確認します。先ほどの`UserStore.swift`と組み合わせますが、正常な実行例には含めません。
+
+```swift expected-diagnostic file=expected-diagnostics/MissingAwait.swift
+func readWithoutAwait(_ store: UserStore) -> Int {
+    store.count()
+}
+```
+
+こちらは同期の隔離外の関数から`store.count()`を呼んでいます。必要なのは、呼び出し側を非同期にしてactorへのアクセスを待てる設計にすることです。`count`から隔離を外して回避すると、最初の例と同じ問題になります。
+
+不変プロパティなら何でも同じ扱いにできるわけでもありません。例では値型の`String`を使っています。`let`で保持した参照型の内部に可変状態がある場合は、参照の代入を禁止しただけでは共有の安全性を説明できません。`nonisolated(unsafe)`による検査の抑制も、この例の解決策にはしていません。
+
+## nonisolatedなasync関数は、どのactorで実行されますか？
+
+ここはコンパイラのバージョンだけでなく、機能設定も必要です。Swift 6.2で実装されたSE-0461では、`NonisolatedNonsendingByDefault`を有効にすると、`nonisolated`な非同期関数が呼び出し元のactorの隔離を引き継ぐ規則になります。明示的に隔離外へ移す`@concurrent`とは区別します。[SE-0461: Run nonisolated async functions on the caller's actor by default](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0461-async-function-isolation.md)
+
+以下は、その機能を有効にする前提の小さな観測用コードです。`#isolation`でactorの隔離を調べます。OSのスレッド番号を調べる例ではありません。
+
+```swift file=nonisolated/AsyncIsolation.swift
+// Requires NonisolatedNonsendingByDefault in this example.
+nonisolated func inheritsMainActor() async -> Bool {
+    #isolation is MainActor
+}
+
+@concurrent
+func hasNoActorIsolation() async -> Bool {
+    switch (#isolation) {
+    case .none: return true
+    case .some: return false
+    }
+}
+```
+
+`MainActor`に隔離された呼び出し元から実行したとき、前者は`MainActor`、後者はactorの隔離なしという結果を期待します。この期待値を、機能設定の異なるプロジェクトへそのまま持ち込まないでください。
+
+宣言の既定の隔離を変える`-default-isolation`も別の設定です。以下の確認では`nonisolated`を明示し、画面用の型に必要な`@MainActor`はコードに書いています。Swift言語モードを6にすることと、既定の隔離を`MainActor`にすることは同義ではありません。[SE-0466: Control default actor isolation inference](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0466-control-default-actor-isolation.md)
+
+## 何を実行して確かめますか？
+
+正常例の3ファイルを一緒にコンパイルするための入口です。同期プロトコル経由の表示、未登録値と上書き、別IDの更新完了、画面状態、非同期関数の隔離を確認します。
+
+```swift file=nonisolated/Checks.swift
+@main
+struct IsolationChecks {
+    @MainActor
+    static func main() async {
+        let store = UserStore(label: "example")
+        let printable: any CustomStringConvertible = store
+        precondition(printable.description == "UserStore(example)")
+        print("CHECK description=synchronous_protocol_requirement")
+
+        let missing = await store.name(for: 1)
+        precondition(missing == nil)
+        await store.update(id: 1, name: "A")
+        await store.update(id: 1, name: "B")
+        let renamed = await store.name(for: 1)
+        let initialCount = await store.count()
+        precondition(renamed == "B" && initialCount == 1)
+        print("CHECK actor_state=missing_insert_overwrite")
+
+        await withTaskGroup(of: Void.self) { group in
+            for id in 2...11 {
+                group.addTask {
+                    await store.update(id: id, name: "User \(id)")
+                }
+            }
+        }
+        let finalCount = await store.count()
+        precondition(finalCount == 11)
+        print("CHECK actor_updates=all_11_ids_present")
+
+        let screen = UserScreenState()
+        screen.select("B")
+        precondition(screen.selectedName == "B")
+        precondition(UserScreenState.greeting("B") == "Hello, B")
+        print("CHECK main_actor_state=separate_from_pure_formatter")
+
+        let inherited = await inheritsMainActor()
+        let unisolated = await hasNoActorIsolation()
+        precondition(inherited && unisolated)
+        print("CHECK async_isolation=caller_actor_vs_concurrent")
+    }
+}
+```
+
+この条件で実行し、次の5行が出力されることを確認しました。
+
+```text
+CHECK description=synchronous_protocol_requirement
+CHECK actor_state=missing_insert_overwrite
+CHECK actor_updates=all_11_ids_present
+CHECK main_actor_state=separate_from_pure_formatter
+CHECK async_isolation=caller_actor_vs_concurrent
+```
+
+検証用環境はApple Swift 6.3.3、macOS SDK 26.5、target `arm64-apple-macosx26.0`です。SDKのバージョンとdeployment targetの26.0は別です。コンパイル時は`-swift-version 6 -strict-concurrency=complete -default-isolation nonisolated -enable-upcoming-feature NonisolatedNonsendingByDefault -parse-as-library`を指定しました。正常例の5項目に成功し、可変状態へのアクセスとawait不足の2件は、それぞれ意図した診断になることを確認しました。 `@concurrent`内の`#isolation`はこの条件では常に`nil`のため、switchの条件が定数になるというwarningも出ます。
+
+最後の件数が11になる検証は、異なるIDの更新が完了したことを見るものです。実行順序、処理速度、複数操作をまとめた原子性は証明しません。actorのメソッド内でも`await`で中断する間に別の処理が進み得るので、中断をまたぐ業務上の条件は別途設計する必要があります。[SE-0306のreentrancy](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0306-actors.md)
+
+SwiftUIで状態を更新する側の例は、[FlutterからSwiftUIへ移るときの状態と非同期処理](/notes/flutter/swiftui/flutter-engineer-learning-swiftui/)で扱います。

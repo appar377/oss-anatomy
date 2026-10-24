@@ -1,0 +1,146 @@
+---
+title: "RailsのDirty Trackingを理解する：saved_change_to_*?はいつtrueになるのか"
+description: "保存前と保存後でDirty Trackingの判定を使い分ける。callbackの順序、同じ値の再保存、transaction内の複数save、reloadで変わる結果を実行例から確認します。"
+date: 2026-07-01
+tags:
+  - Rails
+  - ActiveRecord
+  - Dirty Tracking
+  - Callback
+  - after_commit
+category: Rails
+level: 1
+articleType: internal
+draft: false
+thumbnail: /images/articles/rails-dirty-tracking-saved-change.png
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+保存前に「今回変わるか」を見るなら`will_save_change_to_status?`、保存後に「直前の保存で変わったか」を見るなら`saved_change_to_status?`を使います。ただし、保存後の差分はtransaction全体の履歴ではありません。次の保存や`reload`が入ると、callbackが読む情報も変わります。
+
+以下は説明用の注文モデルです。Ruby 3.4.4、Active Record 8.1.3、sqlite3 gem 2.9.5、SQLite 3.53.2を使い、Railsアプリ全体を起動せずに確認します。`review_orders`には文字列の`status`と`note`があり、timestampはありません。メールや外部ジョブは送信しません。
+
+## callbackの時点と、調べたい差分を合わせる
+
+保存前のAPIは次の保存予定を、保存後のAPIは直前の保存結果を返します。[Dirty API](https://api.rubyonrails.org/classes/ActiveRecord/AttributeMethods/Dirty.html)の説明と、実行版の[8.1.3の実装](https://github.com/rails/rails/blob/v8.1.3/activerecord/lib/active_record/attribute_methods/dirty.rb)を照合しています。
+
+- `before_validation`や`before_update`では、`will_save_change_to_status?`や`status_change_to_be_saved`で保存予定を調べる。
+- `after_update`や`after_save`では、`saved_change_to_status?`や`saved_change_to_status`で直前の保存結果を調べる。
+- `saved_change_to_status?(from: "draft", to: "ready")`のように、変更前後の値も条件にできる。
+
+次のモデルは、それぞれの時点の判定を配列へ残すだけの例です。callback内で追加の保存を行わないため、観察そのものが次の差分を作ることはありません。
+
+```ruby
+class ReviewOrder < ActiveRecord::Base
+  self.table_name = 'review_orders'
+  validates :status, inclusion: { in: %w[draft ready archived] }
+
+  before_update { record_observation(:before_update) }
+  after_update { record_observation(:after_update) }
+  after_commit -> { record_observation(:after_commit) }, on: :update
+
+  def observations
+    @observations ||= []
+  end
+
+  private
+
+  def record_observation(phase)
+    observations << {
+      phase: phase,
+      pending: will_save_change_to_status?,
+      saved: saved_change_to_status?,
+      change: saved_change_to_status&.dup,
+      became_ready: saved_change_to_status?(from: 'draft', to: 'ready')
+    }
+  end
+end
+```
+
+保存前の`saved`もあえて記録しています。これが常にfalseという意味ではなく、前の保存情報が残っていればその情報を読んでしまうためです。今回の保存予定を知りたい場所で使うべきなのは`pending`の側です。
+
+```ruby
+order = ReviewOrder.create!(status: 'draft').reload
+order.update!(status: 'ready')
+
+order.observations.map { |row| [row[:phase], row[:pending], row[:saved]] }
+# => [[:before_update, true, false],
+#     [:after_update, false, true],
+#     [:after_commit, false, true]]
+
+order.observations.last[:change]       # => ['draft', 'ready']
+order.observations.last[:became_ready] # => true
+```
+
+作成直後に`reload`するのは、作成時の差分を取り除いてから更新を観察するためです。保存前後の情報がどのインスタンスに残るかは、[Dirty Trackingの寿命](/notes/rails/active_record/active-record-dirty-tracking-lifecycle/)で詳しく扱います。
+
+## after_updateは、commitの成功を意味しない
+
+`after_update`は更新の保存処理を終えた時点で呼ばれますが、外側にtransactionがあればcommitはまだです。あとでrollbackされると、そこで保存済みと見えていた値もDBには残りません。[transactionの公式API](https://api.rubyonrails.org/v8.1.3/classes/ActiveRecord/Transactions/ClassMethods.html)は、保存callbackとcommit後のcallbackを区別しています。
+
+```ruby
+order = ReviewOrder.create!(status: 'draft').reload
+ReviewOrder.transaction do
+  order.update!(status: 'ready')
+  order.observations.last[:phase] # => :after_update
+  order.saved_change_to_status?   # => true
+  raise ActiveRecord::Rollback
+end
+
+ReviewOrder.find(order.id).status # => 'draft'
+order.observations.any? { |row| row[:phase] == :after_commit } # => false
+```
+
+外部通知をcommit後へ寄せる理由は、この差です。ただし、`after_commit`が呼ばれることと通知が確実に届くことは別です。通知の失敗、再試行、二重実行への対応までDirty Trackingが引き受けるわけではありません。
+
+## 同じtransactionで二回保存すると、何が残るか
+
+ステータスの更新後に別の属性を保存すると、直前の差分はその別の保存に置き換わります。次の例ではDBのステータスは`ready`ですが、commit時の`saved_change_to_status?`はfalseです。
+
+```ruby
+order = ReviewOrder.create!(status: 'draft').reload
+ReviewOrder.transaction do
+  order.update!(status: 'ready')
+  order.update!(note: 'example note')
+  order.saved_changes # => { 'note' => [nil, 'example note'] }
+end
+
+order.observations.last[:saved] # => false
+ReviewOrder.find(order.id).status # => 'ready'
+```
+
+8.1.3では、保存処理が[変更情報を保存後の情報へ移す](https://github.com/rails/rails/blob/v8.1.3/activemodel/lib/active_model/dirty.rb)たびに、直前の差分が更新されます。「transactionのどこかでreadyになった」という条件を、commit時の一回の判定で代用することはできません。
+
+同じ値の再保存でも、以前の遷移を再実行したことにはなりません。すでに`ready`の注文へもう一度`ready`を保存しても、その保存でのステータス変更はありません。失敗した通知を再送したいなら、状態を書き戻してcallbackを起動するのではなく、通知対象を記録し、その再試行を明示的に扱います。
+
+一方、validationに失敗した場合は保存が完了していません。`will_save_change_to_status?`がtrueでも、保存成功の証拠にはなりません。保存結果や例外を確認し、その後の処理を分けます。
+
+## reloadとwith_lockが、判定の前に入っていないか
+
+`reload`は保存前・保存後の変更情報を消します。同じインスタンスをcommit前に読み直すと、commit時の`saved_change_to_status?`もfalseになります。
+
+`with_lock`も対象レコードを読み直します。[8.1.3の公式API](https://api.rubyonrails.org/v8.1.3/classes/ActiveRecord/Locking/Pessimistic.html)では、transaction内で`lock!`を呼び、その中で`reload(lock: ...)`を行う実装を確認できます。
+
+```ruby
+order = ReviewOrder.create!(status: 'draft').reload
+ReviewOrder.transaction do
+  order.update!(status: 'ready')
+  order.with_lock do
+    order.saved_change_to_status? # => false
+  end
+end
+
+order.observations.last[:saved] # => false
+```
+
+ロックを伴う判断・更新は、ロック取得後に行う順序を考えます。この単純な例なら、先に`with_lock`へ入り、その中でステータスを保存します。ただし、そこで再び保存や`reload`をすれば、同じ問題が起きます。
+
+今回SQLiteで確かめたのは再読込とcallbackの順序です。PostgreSQLやMySQLの行ロックによる排他、複数接続の競合は検証していません。別インスタンスでロックを取るだけで、更新前の判断まで保護できるとは扱いません。
+
+## callbackを検証するテストでは、実際にcommitする
+
+この例のRSpecはtransactional fixtureを使わず、各例の開始時に専用メモリDBの対象テーブルを空にします。外側transactionの成功、rollback、複数保存、reloadを実際に実行し、callbackが記録した配列と再検索したDB値を照合します。
+
+保存前後、from/toと同じ値、validation失敗、複数保存、rollback、reload、`with_lock`の順序の7ケースが成功しました。実際のRailsアプリでは他のcallbackも追加されるため、そのアプリのcallbackとtransaction設定を含めた確認が必要です。外部キューへの配送と、同じ行を別インスタンスで更新したときのcallback選択は、この例の範囲に含めません。

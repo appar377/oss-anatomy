@@ -1,0 +1,118 @@
+---
+title: "providers.dartとproviders.g.dartはどうつながっているのか"
+description: "手書きのprovider定義から何が生成され、実行時に何を読むのか。固定したRiverpod 3.2.1環境で生成・override・状態更新・破棄を確認する。"
+date: 2026-07-20
+tags:
+  - "Flutter"
+  - "Riverpod"
+  - "Code Generation"
+  - "Build Runner"
+category: "Flutter"
+level: 2
+articleType: practical
+draft: false
+thumbnail: "/images/articles/riverpod-generated-provider-code.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+`providers.dart`へ`@riverpod`を書いても、アプリから読む`greetingProvider`はまだ見当たりません。その名前や、手書きの関数をRiverpodへ接続するコードを作るのがgeneratorです。
+
+生成はビルド時に行い、生成されたproviderをアプリの実行時に利用します。アノテーションが実行のたびにコードを作るわけではありません。この記事ではDart SDK 3.11.5、riverpod 3.2.1、riverpod_annotation 4.0.2、riverpod_generator 4.0.3、build_runner 2.15.1の組み合わせで確認しています。各パッケージのメジャー番号が同じになるとは限らないため、pubspecとlockfileを合わせて確認します。
+
+## 手書きの定義と生成ファイルは、同じライブラリに属する
+
+```dart
+// lib/providers.dart
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+part 'providers.g.dart';
+
+@riverpod
+String greeting(Ref ref, String name) => 'Hello, $name';
+
+@Riverpod(keepAlive: true)
+class VisitCount extends _$VisitCount {
+  @override
+  int build() => 0;
+
+  void increment() => state++;
+}
+```
+
+`part`は生成ファイルを同じDartライブラリの一部として組み込む指定です。そのため、生成側の`_$VisitCount`のようなprivate名も手書き側から使えます。生成後のファイルには、対応する`part of 'providers.dart';`があります。[Dartのライブラリ](https://dart.dev/language/libraries)
+
+`greeting`には値を作る処理、`VisitCount`には初期値と変更操作を書いています。generatorはその定義を読み取り、引数や戻り値に応じたproviderと基底クラスを生成します。今回は`greetingProvider`と`visitCountProvider`が生成されることを確認しました。[Riverpodのコード生成](https://riverpod.dev/docs/concepts/about_code_generation)
+
+Riverpod 3では通常の`Ref`を使います。古い例にある`UserRef`などの生成されたRef型や、古い内部コンストラクタの形を、そのまま現行の生成物として説明しないようにします。[Riverpod 3への移行](https://riverpod.dev/docs/3.0_migration#simplified-ref-and-removed-ref-subclasses)
+
+## 生成はbuild_runnerで実行する
+
+上の例では、実行用と生成用の依存を分けて固定しました。
+
+```yaml
+dependencies:
+  riverpod: 3.2.1
+  riverpod_annotation: 4.0.2
+dev_dependencies:
+  riverpod_generator: 4.0.3
+  build_runner: 2.15.1
+```
+
+```bash
+dart pub get
+dart run build_runner build
+```
+
+開発中に継続して生成したい場合は`dart run build_runner watch`も使えます。[build_runnerの公式説明](https://pub.dev/packages/build_runner/versions/2.15.1)
+
+今回、生成前の解析では`providers.g.dart`が未生成というエラーを確認しました。生成後は解析が通り、生成されたproviderを読むテストも成功しています。検証では生成処理に`build --force-jit`を使用しています。これはビルダーの実行方式の指定であり、生成されたproviderの利用方法は変わりません。
+
+生成ファイルを手で直しても、その変更は次の生成で置き換わり得ます。直す場所は定義元、アノテーション、生成設定です。生成物をGitへ含めるかはチームの方針ですが、どちらの場合も、依存バージョンと生成手順から再現できる状態にします。
+
+## 呼び出し側は、生成されたproviderを読む
+
+同じパッケージからは、生成ファイルではなく定義元をimportします。
+
+```dart
+import 'package:riverpod/riverpod.dart';
+import 'providers.dart';
+
+void main() {
+  final container = ProviderContainer();
+  try {
+    print(container.read(greetingProvider('Aki'))); // Hello, Aki
+    container.read(visitCountProvider.notifier).increment();
+    print(container.read(visitCountProvider)); // 1
+  } finally {
+    container.dispose();
+  }
+}
+```
+
+`greeting`の追加引数はfamilyの入力となり、呼び出し側は`greetingProvider('Aki')`のように指定します。`VisitCount`は`.notifier`から手書きの操作を呼び、providerから現在の値を読みます。generatorが業務処理を考えてくれるわけではなく、`increment`の内容は定義元のコードです。
+
+FlutterのWidgetから使う場合は、`ProviderScope`の下で`ref.watch`などを使います。ここではWidgetテストを実行せず、Flutter依存のない`ProviderContainer`で生成物の動きを確認しています。[ProviderContainerを使うテスト](https://riverpod.dev/docs/how_to/testing#unit-tests)
+
+## autoDisposeとkeepAliveは、生成方法から確認する
+
+コード生成を使う`@riverpod`のproviderは既定でautoDisposeです。監視するlistenerがなくなったあとの破棄を無効にしたい場合は、例のように`@Riverpod(keepAlive: true)`を指定します。[コード生成時のautoDispose](https://riverpod.dev/docs/concepts/about_code_generation#enablingdisable-autodispose)
+
+検証では、autoDisposeのカウンターを監視して1へ更新し、最後のlistenerを閉じて`container.pump()`したあと、読み直すと0へ戻ることを確認しました。keepAliveのカウンターは、同じcontainer内の監視の切れ目では1を保持しました。ただし、別のcontainerへ状態を共有したり、アプリ終了後へ永続化したりする設定ではありません。
+
+テスト中に状態を維持したいときも、`read`だけに頼らず`listen`で監視する必要があります。これは[Riverpodのテストガイド](https://riverpod.dev/docs/how_to/testing)でも注意されている点です。
+
+## overrideは生成ファイルを編集せず指定できる
+
+```dart
+final container = ProviderContainer.test(overrides: [
+  greetingProvider('Aki').overrideWith((ref) => 'Preview'),
+]);
+expect(container.read(greetingProvider('Aki')), 'Preview');
+expect(container.read(greetingProvider('Haru')), 'Hello, Haru');
+```
+
+これは`package:test`のテスト関数内で使う抜粋です。今回の6テストでは、引数ごとの値、特定のfamily入力だけのoverride、Notifierの更新、autoDispose、keepAlive、container間の状態分離を確認しました。[overrideを使ったテスト](https://riverpod.dev/docs/how_to/testing#mocking-providers)
+
+生成物を読むときは、定義元のどの関数やクラスへ接続しているか、引数は何か、破棄の設定は何かに注目します。内部クラス名や生成されたハッシュの全行を、手書きで保守するAPIとして扱う必要はありません。

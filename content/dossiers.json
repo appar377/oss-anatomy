@@ -1,0 +1,834 @@
+[
+  {
+    "id": "react",
+    "title": "React",
+    "tagline": "状態から、画面が生まれる。",
+    "summary": "useStateの入口から更新キューへ。画面が変わる理由をたどります。",
+    "domain": "ui",
+    "language": "JavaScript",
+    "prerequisite": "JavaScriptの関数・Reactの基本",
+    "learning": ["状態更新", "Hookの記録", "責務の分離"],
+    "chapters": [
+      {
+        "id": "outside",
+        "title": "画面の変化から、入口を探す",
+        "lead": "ボタンを押すと数字が増える。この小さな変化を、Reactの入口までたどります。",
+        "paragraphs": [
+          "ここで追うのはブラウザ上の関数コンポーネントとuseStateです。Server ComponentsやSuspenseの全体像を一度に扱わず、ひとつの状態更新に範囲を絞ります。React 19.2.0の原本を読むための入口です。",
+          "下の例では、クリック時にsetCountへ更新関数を渡します。その場でcountという変数を書き換えるのではなく、次の表示に使う状態の計算をReactへ頼みます。イベントハンドラーが見ているcountは、その描画の値です。",
+          "公開APIのuseStateは短い関数です。ReactHooks.jsではresolveDispatcherで現在の担当を取り出し、dispatcher.useStateへ処理を渡しています。入口だけでは状態の保存場所まで分かりません。次章で担当の置き場所を探します。"
+        ],
+        "code": "function Counter() {\n  const [count, setCount] = useState(0);\n  return <button onClick={() => setCount(n => n + 1)}>\n    {count}\n  </button>;\n}",
+        "language": "tsx",
+        "sourcePath": "packages/react/src/ReactHooks.js",
+        "sourceLine": 66,
+        "flow": [
+          {
+            "title": "クリック",
+            "detail": "イベントハンドラーが呼ばれる。"
+          },
+          {
+            "title": "更新を渡す",
+            "detail": "setCountへ n => n + 1 を渡す。"
+          },
+          {
+            "title": "次の表示",
+            "detail": "Reactが次のstateでコンポーネントを評価する。"
+          }
+        ],
+        "design": "公開APIと実行担当を分けると、同じuseStateでも初回と更新時で別の処理を選べます。「関数が短い」ことは「処理が無い」ことではありません。",
+        "question": "setCountを呼んだ直後、同じハンドラーのcountは必ず新しい値になりますか？",
+        "answer": "いいえ。その描画で得たcountは変わりません。次の描画で新しい値を受け取ります。"
+      },
+      {
+        "id": "directory",
+        "title": "3つのディレクトリを地図にする",
+        "lead": "react、react-reconciler、react-dom。それぞれの役割を分けて読みます。",
+        "paragraphs": [
+          "packages/reactにはuseStateなどの公開APIがあります。packages/react-reconcilerはコンポーネントの仕事や状態更新を調整します。packages/react-domはブラウザのDOMへ接続する側です。これはソースの責務の区分であり、読者のアプリが内部パッケージを直接importするという意味ではありません。",
+          "ReactDOMRoot.jsではcreateRootなどのDOM用入口を確認できます。一方、今回の中心となるmountStateとdispatchSetStateはReactFiberHooks.jsです。公開APIから内部処理へ移動する際は、ファイル名だけでなく関数名を記録しましょう。",
+          "同じ名前の関数を探すだけでは初回と更新時を混同します。HooksDispatcherOnMount、HooksDispatcherOnUpdateの割り当ても見ると、どの実装が選ばれるかを理解できます。"
+        ],
+        "code": "packages/\n├─ react/src/ReactHooks.js          # 公開API\n├─ react-reconciler/src/\n│  ├─ ReactFiberHooks.js            # Hookと更新キュー\n│  └─ ReactFiberWorkLoop.js         # 作業の調整\n└─ react-dom/src/client/ReactDOMRoot.js # DOM側の入口",
+        "language": "text",
+        "sourcePath": "packages/react-reconciler/src/ReactFiberHooks.js",
+        "sourceLine": 1923,
+        "flow": [
+          {
+            "title": "公開API",
+            "detail": "ReactHooks.jsから担当へ委譲。"
+          },
+          {
+            "title": "調整役",
+            "detail": "ReactFiberHooks.jsで状態とキューを扱う。"
+          },
+          {
+            "title": "描画先",
+            "detail": "ReactDOMRoot.jsはDOM用の入口。"
+          }
+        ],
+        "design": "描画先と状態の調整を分けることで、DOM以外のレンダラーとの責務も整理できます。ここではreconcilerの全処理をDOM操作と呼ばないことが大切です。",
+        "question": "useStateの内部実装を探すとき、react-domだけを読めば十分ですか？",
+        "answer": "十分ではありません。公開APIはreact、Hookの中心処理はreact-reconcilerにもあります。"
+      },
+      {
+        "id": "flow",
+        "title": "setStateから、更新の予約へ",
+        "lead": "更新関数が届いた後の流れを、通常のイベント更新に絞って追います。",
+        "paragraphs": [
+          "mountStateはdispatchSetStateに現在のFiberとqueueを結びつけた関数を作り、stateと一緒に返します。これが呼び出し側でsetCountと名付けた関数です。名前は自由でも、更新先との結びつきはReactが保持します。",
+          "dispatchSetStateではrequestUpdateLaneで更新の扱いを決め、dispatchSetStateInternalへ渡します。内部ではactionを持つupdateを組み立て、必要ならenqueueConcurrentHookUpdateを経てscheduleUpdateOnFiberを呼びます。",
+          "すべての更新が必ず同じ経路で描画されるわけではありません。描画中の更新には分岐があり、条件が整うと次の状態を先に計算して、同じ値なら早めに処理を省く場合もあります。図は通常経路の縮約です。"
+        ],
+        "code": "// 読解用の経路図。実装コードの置換ではありません。\nsetCount(action)\n  → dispatchSetState(fiber, queue, action)\n  → dispatchSetStateInternal(...)\n  → enqueueConcurrentHookUpdate(...)\n  → scheduleUpdateOnFiber(...)",
+        "language": "text",
+        "sourcePath": "packages/react-reconciler/src/ReactFiberHooks.js",
+        "sourceLine": 3599,
+        "flow": [
+          {
+            "title": "更新を受ける",
+            "detail": "Fiber・queue・actionが渡る。"
+          },
+          {
+            "title": "優先度を決める",
+            "detail": "laneを選んでupdateを構成する。"
+          },
+          {
+            "title": "キューへ積む",
+            "detail": "通常経路で更新を登録する。"
+          },
+          {
+            "title": "仕事を予約する",
+            "detail": "rootが得られればscheduleUpdateOnFiberへ。"
+          }
+        ],
+        "design": "更新を即座のDOM操作にせず、調整できる仕事として持つ設計です。受付、計算、DOMへの反映を分けると、途中の分岐を追いやすくなります。",
+        "question": "setStateは、呼び出したその行で必ずDOMを書き換える関数ですか？",
+        "answer": "いいえ。更新の登録とスケジュールに関わります。DOMへの反映までを一行の同期操作とはみなしません。"
+      },
+      {
+        "id": "state",
+        "title": "stateはどこに置かれる？",
+        "lead": "Hookの記録と更新キューを、混ぜずに見ていきます。",
+        "paragraphs": [
+          "mountStateImplはHookを用意し、memoizedStateとbaseStateに初期値を入れます。初期値が関数ならここで評価します。開発時のStrict Modeに関わる追加呼び出しもあるため、初期化関数へ外部への送信などを入れるべきではありません。",
+          "Hookにはqueueも結びつきます。queueにはpending、dispatch、lastRenderedReducer、lastRenderedStateなどがあります。状態の値だけでなく、「次の更新をどこへ渡すか」「前に何で計算したか」を持つ構造です。",
+          "イベントハンドラーのローカル変数と、Reactが管理するHookの記録は別です。関数コンポーネントの呼び出しが終わっても次回へ状態を引き継げるのは、React側がその記録を管理しているからです。内部フィールドは公開APIではなく、この固定版の読解対象です。"
+        ],
+        "code": "// フィールドの観察メモ（説明用）\nhook.memoizedState  // このHookの状態\nhook.baseState      // 更新を処理する際の基準\nhook.queue          // 更新を管理するキュー\nqueue.pending       // 保留中の更新\nqueue.dispatch      // 呼び出し側へ返す更新関数",
+        "language": "text",
+        "sourcePath": "packages/react-reconciler/src/ReactFiberHooks.js",
+        "sourceLine": 1895,
+        "flow": [
+          {
+            "title": "初期値",
+            "detail": "値または初期化関数を受け取る。"
+          },
+          {
+            "title": "Hook",
+            "detail": "memoizedState / baseStateを用意。"
+          },
+          {
+            "title": "Queue",
+            "detail": "更新とdispatchを保持。"
+          }
+        ],
+        "design": "コンポーネントの一回の評価と、継続して管理する状態を分けています。Hookの呼び出し順を一定にするルールも、前後の記録を対応づけるために理解できます。",
+        "question": "countというローカル変数だけが、次回の状態を保存していますか？",
+        "answer": "いいえ。ReactのHook記録が保持します。countは現在の描画で受け取った値です。"
+      },
+      {
+        "id": "design",
+        "title": "同じ値なら、省ける仕事がある",
+        "lead": "最適化の条件を読んで、「いつも起きる」と言い切らない練習をします。",
+        "paragraphs": [
+          "dispatchSetStateInternalには、Fiberのlaneとalternateのlaneが空で、最後のreducerが分かるときに次の状態を先に計算する経路があります。計算結果を現在値とisで比較し、同じならeager bailoutへ進みます。",
+          "ここで扱うisは値の同一性を比べるための処理です。オブジェクトの深い中身をすべて比べる設計ではありません。同じオブジェクトを直接変更して再設定すると、変更が期待どおり表示に現れるとは限らない理由につながります。",
+          "この章は「同じ値を渡せばコンポーネントが絶対に呼ばれない」と保証するものではありません。保留更新や別の原因による描画などで経路は変わります。最適化の分岐と公開APIの約束を分けて読む習慣をつけましょう。"
+        ],
+        "code": "// アプリ側の例: 新しいオブジェクトを渡す\nsetProfile(previous => ({\n  ...previous,\n  name: \"Aoi\"\n}));\n// previous.name = \"Aoi\" の直接変更を避ける",
+        "language": "tsx",
+        "sourcePath": "packages/react-reconciler/src/ReactFiberHooks.js",
+        "sourceLine": 3648,
+        "flow": [
+          {
+            "title": "前提を調べる",
+            "detail": "空のlane・既知のreducerなど。"
+          },
+          {
+            "title": "先に計算",
+            "detail": "eagerStateを作って現在値と比較。"
+          },
+          {
+            "title": "省略候補",
+            "detail": "同値なら早期終了の経路へ。"
+          }
+        ],
+        "design": "値が変わっていない場合の仕事を減らす代わりに、呼び出し側は状態を変更可能な共有箱として扱わない設計が必要です。最適化とアプリ側の規律が接続しています。",
+        "question": "同じ参照のオブジェクトを直接変更しただけで、深い比較により変更を検出してくれますか？",
+        "answer": "その前提では読めません。ここは深い比較ではなく同一性の比較です。新しい値を作る更新を使います。"
+      },
+      {
+        "id": "experiment",
+        "title": "2回の更新を、手元で比べる",
+        "lead": "同じ値を2回渡す場合と、更新関数を2回渡す場合を比較します。",
+        "paragraphs": [
+          "Counterのクリックハンドラーを下の2つで入れ替え、0から1回クリックして表示を比べましょう。useStateをimportしたコンポーネントで、同じイベント内に2行を書きます。別々のクリックを比べる実験ではありません。",
+          "最初はどちらも、その描画のcountから計算した1を渡します。後者はキューの前の状態を受け取る更新関数を2つ渡すので、0から1、1から2へと計算できます。予想は前者が1、後者が2です。",
+          "下の操作できる実験は、この違いを純粋なキュー計算として示す教材モデルです。React内部のスケジューラーを再実装したものではありません。固定版Reactアプリでの確認はコードを手元で実行して行ってください。"
+        ],
+        "code": "// A: 同じ描画のcountを2回参照\nsetCount(count + 1);\nsetCount(count + 1);\n\n// B: 直前の計算結果を受け取る\nsetCount(n => n + 1);\nsetCount(n => n + 1);",
+        "language": "tsx",
+        "sourcePath": "packages/react-reconciler/src/ReactFiberHooks.js",
+        "sourceLine": 3599,
+        "flow": [
+          {
+            "title": "予想",
+            "detail": "AとBの結果を先に書く。"
+          },
+          {
+            "title": "実行",
+            "detail": "同じクリック内で2回呼ぶ。"
+          },
+          {
+            "title": "照合",
+            "detail": "値・action・キューの違いを説明。"
+          }
+        ],
+        "design": "コードの行数が同じでも、渡すものが値か関数かで契約が変わります。使い方の違いを原本のactionとreducerへ結びつけるのが、この解剖の到達点です。",
+        "question": "0から更新関数 n => n + 1 を同じイベントで2回渡すと、予想値はいくつですか？",
+        "answer": "2です。各更新関数が前の結果を受け取って計算します。"
+      }
+    ],
+    "related": ["rails", "rspec"],
+    "version": "v19.2.0",
+    "commit": "ae74234eae6ebd62f19190731278e20bc1c37d51",
+    "repo": "facebook/react",
+    "license": "MIT",
+    "scope": "関数コンポーネントのuseStateと通常の更新"
+  },
+  {
+    "id": "rails",
+    "title": "Rails",
+    "tagline": "ひとつのリクエストから、設計の奥へ。",
+    "summary": "URLからルーティング、コントローラーへ。リクエストの旅を追います。",
+    "domain": "web",
+    "language": "Ruby",
+    "prerequisite": "Rubyのクラス・HTTPの基本",
+    "learning": ["リクエストの流れ", "ディレクトリ", "責務の分離"],
+    "chapters": [
+      {
+        "id": "outside",
+        "title": "URLの先で、何が動く？",
+        "lead": "GET /helloに文字列が返る。その境界からRailsをひらきます。",
+        "paragraphs": [
+          "Railsは多くの部品を持つフレームワークです。この巻ではRails 8.1.0のHTTPリクエストからコントローラーのactionへ届く道に絞ります。DBやActive Jobまで一緒に追わず、データベースを使わないhelloを例にします。",
+          "アプリのroutes.rbで行き先を決め、HelloControllerのshowで文字列を返します。この2つは利用者が書くアプリのコードです。Rails本体のRouteSetやDispatcherと区別して読みます。",
+          "サーバーはHTTPを受けてRackのenvをアプリへ渡します。Railsのルート集合もcall(env)という入口を持ちます。下のコードを見て「URLの文字列がそのままメソッドを呼ぶ」と考えず、その間に照合とdispatchがあることを確かめましょう。"
+        ],
+        "code": "# アプリのコード例\n# config/routes.rb\nget \"/hello\", to: \"hello#show\"\n\n# app/controllers/hello_controller.rb\nclass HelloController < ApplicationController\n  def show\n    render plain: \"Hello, reader!\"\n  end\nend",
+        "language": "ruby",
+        "sourcePath": "actionpack/lib/action_dispatch/routing/route_set.rb",
+        "sourceLine": 903,
+        "flow": [
+          {
+            "title": "HTTP",
+            "detail": "GET /hello を送る。"
+          },
+          {
+            "title": "経路の照合",
+            "detail": "routes.rbの設定に合う行き先を選ぶ。"
+          },
+          {
+            "title": "応答",
+            "detail": "showが本文を作り、HTTP応答へ戻る。"
+          }
+        ],
+        "design": "通信の入口と業務のactionを離すことで、URL構成を調整してもactionの責務を保ちやすくなります。Railsが行う処理とアプリが決める処理を分けます。",
+        "question": "HelloController#showはRails原本に定義されているメソッドですか？",
+        "answer": "この例ではアプリ作者が書くメソッドです。Rails本体はそこへ届く仕組みを提供します。"
+      },
+      {
+        "id": "directory",
+        "title": "Action Packの中を歩く",
+        "lead": "routing、journey、controller、abstract_controllerを地図に置きます。",
+        "paragraphs": [
+          "この道を読む中心はactionpackです。action_dispatch/routingのRouteSetはアプリのルート集合を扱い、journey/router.rbはマッチする経路をたどります。action_controller/metal.rbはrequestとresponseをactionの実行へ接続します。",
+          "abstract_controller/base.rbはaction名を処理する土台です。継承とincludeで処理が重なるため、1ファイルだけでHTTPの全処理が完結する構造ではありません。process_actionには別モジュールも関与します。",
+          "Active RecordはDBを扱う別の部品です。Railsと関連があるからといって、すべてのリクエストがActive Recordを通るわけではありません。helloのようにDBを使わない応答もあります。"
+        ],
+        "code": "actionpack/lib/\n├─ action_dispatch/\n│  ├─ routing/route_set.rb\n│  └─ journey/router.rb\n├─ action_controller/metal.rb\n└─ abstract_controller/base.rb",
+        "language": "text",
+        "sourcePath": "actionpack/lib/action_dispatch/routing/route_set.rb",
+        "sourceLine": 39,
+        "flow": [
+          {
+            "title": "RouteSet",
+            "detail": "ルート集合の入口。"
+          },
+          {
+            "title": "Journey",
+            "detail": "照合したrouteを処理。"
+          },
+          {
+            "title": "Controller",
+            "detail": "request/responseとactionをつなぐ。"
+          }
+        ],
+        "design": "部品の分類は、必ず通る依存順を表すものではありません。今回の経路に必要なファイルを選び、読まない範囲も明示すると、大きなOSSでも探索を続けられます。",
+        "question": "RailsのHTTP応答は必ずDBアクセスを伴いますか？",
+        "answer": "いいえ。例のhelloは文字列だけを返します。DBの利用はアプリの処理によります。"
+      },
+      {
+        "id": "flow",
+        "title": "リクエストの旅をたどる",
+        "lead": "RouteSetからactionまで、4つの受け渡しを追います。",
+        "paragraphs": [
+          "RouteSet#callはenvからrequestを作り、path_infoを正規化して@router.serveへ渡します。Journey::Router#serveは認識したrouteごとにpath_parametersを設定し、route.app.serveを呼びます。",
+          "通常のコントローラー宛の経路ではDispatcher#serveがcontrollerを解決し、responseを作ってdispatchへ渡します。ここでparams[:action]が行き先のaction名として使われます。",
+          "ActionController::Metal#dispatchではrequestとresponseを設定してprocess(name)を呼び、最後に応答を配列形式へまとめます。実際にはmiddleware、callbacks、例外処理などが前後にあります。図は通常のcontroller routeに限定した入口の経路です。"
+        ],
+        "code": "# 読解用の縮約。Rubyの実行コードではありません。\nRouteSet#call(env)\n  → Journey::Router#serve(request)\n  → Dispatcher#serve(request)\n  → controller.dispatch(action, request, response)\n  → process(action)",
+        "language": "text",
+        "sourcePath": "actionpack/lib/action_dispatch/routing/route_set.rb",
+        "sourceLine": 903,
+        "flow": [
+          {
+            "title": "受け取る",
+            "detail": "RouteSetがenvからrequestを作る。"
+          },
+          {
+            "title": "行き先を決める",
+            "detail": "Journeyがrouteとpath_parametersを得る。"
+          },
+          {
+            "title": "担当へ渡す",
+            "detail": "Dispatcherがcontrollerとresponseを用意。"
+          },
+          {
+            "title": "実行する",
+            "detail": "Metal#dispatchからprocessへ。"
+          }
+        ],
+        "design": "経路の照合とactionの実行を分離しています。入口の変更、パラメータの受け渡し、応答の形成を別々に観察できるため、不具合の場所も絞りやすくなります。",
+        "question": "path_parametersは、図のどの段階でrequestへ設定されますか？",
+        "answer": "Journey::Router#serveで、認識したrouteのparametersがrequestへ設定されます。"
+      },
+      {
+        "id": "state",
+        "title": "requestとresponseを分けて見る",
+        "lead": "入力、行き先、出力。それぞれを別の箱として観察します。",
+        "paragraphs": [
+          "Rackのenvはリクエストを表す情報を持ち、Railsのrequestはその情報を扱う窓口になります。path_parametersはルーティングによって得られたcontroller、action、idなどです。クエリやフォームから来る値と、出所を区別して考えます。",
+          "Dispatcherはcontroller.make_response!でresponseを用意します。Metal#dispatchはそれを自身へ設定してprocessを実行します。actionがrenderすると本文や形式が応答へ反映されます。",
+          "paramsに含まれるidは、まだDBのレコードそのものではありません。Article.find(params[:id])をアプリに書いた場合に、そのモデルへの問い合わせが発生します。Railsがすべてのidを自動でDBから探すわけではありません。"
+        ],
+        "code": "# アプリの説明用コード\ndef show\n  requested_id = params[:id]  # 入力\n  article = Article.find(requested_id) # DBへの操作\n  render json: { title: article.title } # 出力\nend",
+        "language": "ruby",
+        "sourcePath": "actionpack/lib/action_controller/metal.rb",
+        "sourceLine": 249,
+        "flow": [
+          {
+            "title": "入力",
+            "detail": "request / params。IDとレコードは別。"
+          },
+          {
+            "title": "アプリの処理",
+            "detail": "必要ならモデルへ問い合わせる。"
+          },
+          {
+            "title": "出力",
+            "detail": "responseへ本文・statusなどを設定。"
+          }
+        ],
+        "design": "入力を受けること、データを取得すること、応答を作ることは異なる責務です。どの段階にI/Oがあるかを線に書き込むと、遅延や例外の発生箇所が見えます。",
+        "question": "params[:id]を読んだだけでDBのレコードを取得していますか？",
+        "answer": "いいえ。値を読むこととArticle.findなどの問い合わせは別の操作です。"
+      },
+      {
+        "id": "design",
+        "title": "actionの境界をつくる",
+        "lead": "processが単純なsendで終わらない理由を読みます。",
+        "paragraphs": [
+          "AbstractController::Base#processはaction名を文字列として記録し、_find_action_nameで実行できるactionを探します。見つからなければActionNotFoundを起こします。その後でresponse_bodyを初期化し、process_actionへ進みます。",
+          "この入口があることで、action名の解決、実行可能性、応答状態の準備をまとめて扱えます。さらにcallbacksやrenderingのモジュールが処理へ関わります。Rubyのメソッドが存在することだけで、HTTPから公開されるactionとは言えません。",
+          "ただしactionを見つける仕組みは、ユーザーの認可を自動で完成させるものではありません。誰がそのデータを読めるかという判断は、アプリ側で設計し検証します。認証と認可も別です。"
+        ],
+        "code": "# 原本を読むときの確認順（説明用）\n# 1. action名を記録\n# 2. 実行可能なaction名を解決\n# 3. 見つからなければActionNotFound\n# 4. 応答本文を初期化\n# 5. process_actionへ",
+        "language": "ruby",
+        "sourcePath": "actionpack/lib/abstract_controller/base.rb",
+        "sourceLine": 148,
+        "flow": [
+          {
+            "title": "名前",
+            "detail": "action.to_sを記録する。"
+          },
+          {
+            "title": "解決",
+            "detail": "_find_action_nameで確認する。"
+          },
+          {
+            "title": "実行",
+            "detail": "responseの準備後にprocess_action。"
+          }
+        ],
+        "design": "共通の入口へ規則を集めることで、個々のactionが同じ準備を繰り返さずに済みます。フレームワークの規則とアプリ固有の権限を混同しないことが設計を読む鍵です。",
+        "question": "action名が解決できれば、すべての利用者にデータを公開して安全ですか？",
+        "answer": "いいえ。actionの解決と、利用者ごとの認可は別の責務です。"
+      },
+      {
+        "id": "experiment",
+        "title": "経路だけを変えて確かめる",
+        "lead": "同じactionへ別のURLを結び、役割の分離を観察します。",
+        "paragraphs": [
+          "Rails 8.1.0の手元の検証アプリで、最初のhelloのrouteに下の2行を設定します。既存アプリの本番設定を編集せず、DBの無い小さな検証アプリで行ってください。",
+          "bin/rails routesで2つのURLがhello#showへ向いていることを確認し、サーバーを起動して両方へGETを送ります。期待する本文はどちらもHello, reader!です。URLを変えてもactionを共用できることが分かります。",
+          "次に未定義の/unknownへアクセスします。ルートが無い場合とaction内で失敗する場合を分けて記録しましょう。開発環境と本番環境ではエラー画面が異なるので、本文の見た目だけで失敗位置を決めないようにします。このサイトではRailsサーバーを実行していません。"
+        ],
+        "code": "# config/routes.rb（検証用アプリ）\nget \"/hello\", to: \"hello#show\"\nget \"/greeting\", to: \"hello#show\"\n\n# ターミナル\n# bin/rails routes\n# curl -i http://localhost:3000/hello\n# curl -i http://localhost:3000/greeting",
+        "language": "ruby",
+        "sourcePath": "actionpack/lib/action_dispatch/journey/router.rb",
+        "sourceLine": 30,
+        "flow": [
+          {
+            "title": "設定",
+            "detail": "2つのrouteを同じactionへ。"
+          },
+          {
+            "title": "観察",
+            "detail": "routesとHTTP応答を確認。"
+          },
+          {
+            "title": "比較",
+            "detail": "未定義URLとの違いを記録。"
+          }
+        ],
+        "design": "入力の住所と処理の責務を別々に変更できます。実験の結果をRouteSet → Journey → Dispatcherへ戻して説明できれば、外側の動作と内部の地図がつながります。",
+        "question": "/helloと/greetingが同じshowへ向くなら、actionを2つ作る必要がありますか？",
+        "answer": "この例では不要です。2つのrouteから同じactionを呼べます。"
+      }
+    ],
+    "related": ["devise", "rspec"],
+    "version": "v8.1.0",
+    "commit": "1cdd190a25e483b65f1f25bbd0f13a25d696b461",
+    "repo": "rails/rails",
+    "license": "MIT",
+    "scope": "HTTPからcontroller actionへの通常経路"
+  },
+  {
+    "id": "devise",
+    "title": "Devise",
+    "tagline": "認証の境界を、ひとつずつ。",
+    "summary": "ログインの入口から認証戦略へ。RailsとWardenの境界を見ます。",
+    "domain": "auth",
+    "language": "Ruby",
+    "prerequisite": "Railsのリクエスト処理",
+    "learning": ["認証の流れ", "scope", "失敗時の設計"],
+    "chapters": [
+      {
+        "id": "outside",
+        "title": "ログインを3つの仕事に分ける",
+        "lead": "画面、認証の判定、ログイン状態。Deviseがつなぐ境界を見ます。",
+        "paragraphs": [
+          "Devise 4.9.4のdatabase_authenticatableを読みます。メールアドレスとパスワードを使うログインの通常経路が対象です。OAuth、二要素認証、組織ごとの権限判定までを扱う巻ではありません。",
+          "SessionsController#createの入口にはwarden.authenticate!があります。Deviseだけで認証の全処理を抱えず、Wardenへ判定を委ね、その後sign_inや応答へ進む構造です。ログイン画面が表示できることと、判定が成功したことを分けます。",
+          "RailsのあとにDeviseを置くのは学習上の関連です。RailsがDeviseへ依存するという意味ではありません。実際のDeviseのgemspecにはwarden、bcrypt、railtiesなどの依存が記載されています。"
+        ],
+        "code": "# アプリ側の利用例（既にDevise導入済みの場合）\nclass AccountController < ApplicationController\n  before_action :authenticate_user!\n\n  def show\n    render plain: current_user.email\n  end\nend",
+        "language": "ruby",
+        "sourcePath": "app/controllers/devise/sessions_controller.rb",
+        "sourceLine": 18,
+        "flow": [
+          {
+            "title": "入口",
+            "detail": "保護対象の画面へアクセス。"
+          },
+          {
+            "title": "認証",
+            "detail": "Wardenを介して利用者を判定。"
+          },
+          {
+            "title": "アプリ",
+            "detail": "判定後の利用者で応答を作る。"
+          }
+        ],
+        "design": "認証済みの利用者を得る部分と、その利用者に何を許すかは分けます。この例のauthenticate_user!だけで全データへの権限が完成するわけではありません。",
+        "question": "Rails本体はDeviseを必須依存としている、という図にしてよいですか？",
+        "answer": "いいえ。学習上の関連です。Devise側のgemspecにはrailtiesなどの依存が定義されています。"
+      },
+      {
+        "id": "directory",
+        "title": "コントローラーと戦略を探す",
+        "lead": "appとlibを行き来しながら、ひとつの認証を追います。",
+        "paragraphs": [
+          "app/controllers/deviseにはセッションなどのHTTP側のコントローラーがあります。lib/devise/strategiesにはWardenへ登録する認証戦略があります。lib/devise/modelsにはユーザーモデルへ加える振る舞いが置かれています。",
+          "今回の要はsessions_controller.rb、strategies/database_authenticatable.rb、models/database_authenticatable.rbです。同じ名前でも、strategyは認証の進行、modelはパスワード検証などに役割があります。",
+          "controllers/helpers.rbも読むとauthenticate_user!のようなヘルパーがmappingごとに生成されることを確認できます。userという名前に固定された1本の関数を探すと見つけにくい理由です。"
+        ],
+        "code": "app/controllers/devise/sessions_controller.rb\nlib/devise/\n├─ controllers/helpers.rb\n├─ strategies/database_authenticatable.rb\n└─ models/database_authenticatable.rb\ndevise.gemspec  # 外部gemへの実依存",
+        "language": "text",
+        "sourcePath": "lib/devise/controllers/helpers.rb",
+        "sourceLine": 113,
+        "flow": [
+          {
+            "title": "Controller",
+            "detail": "HTTPのセッション操作。"
+          },
+          {
+            "title": "Strategy",
+            "detail": "認証を進める判定手順。"
+          },
+          {
+            "title": "Model",
+            "detail": "利用者データと検証処理。"
+          }
+        ],
+        "design": "同名ファイルをディレクトリの責務で読み分けます。認証手順とモデルの処理を分けることで、どこで外部ライブラリへ渡るかも見やすくなります。",
+        "question": "strategyとmodelのdatabase_authenticatable.rbは同じ役割ですか？",
+        "answer": "違います。前者は認証の進行、後者はパスワード検証などモデルへ加える振る舞いを担います。"
+      },
+      {
+        "id": "flow",
+        "title": "判定が成功するまでを追う",
+        "lead": "ユーザー検索、パスワード照合、成功の通知を順に読みます。",
+        "paragraphs": [
+          "SessionsController#createはwarden.authenticate!でresourceを得ます。database_authenticatable戦略のauthenticate!では、passwordが存在するとき、mapping.toからfind_for_database_authenticationを呼びます。",
+          "続いてvalidate(resource)のブロック内でresource.valid_password?(password)を呼びます。検証が通ればremember_me、after_database_authenticationを経てsuccess!(resource)へ進みます。パスワード比較をコントローラーに直接書いていません。",
+          "実際の戦略選択と成功・失敗の取り回しにはWardenが関わります。ここで示すのはDevise側から見える正常系の骨格です。resourceが見つからない分岐やparanoid設定も同じファイルにあり、失敗時まで含めて原本を確認できます。"
+        ],
+        "code": "# 正常系の読解メモ。実装の引用ではありません。\nwarden.authenticate!\n  → find_for_database_authentication\n  → valid_password?\n  → success!(resource)\n  → SessionsControllerでsign_inと応答",
+        "language": "text",
+        "sourcePath": "lib/devise/strategies/database_authenticatable.rb",
+        "sourceLine": 9,
+        "flow": [
+          {
+            "title": "探す",
+            "detail": "認証用の条件でresourceを探す。"
+          },
+          {
+            "title": "確かめる",
+            "detail": "valid_password?で照合。"
+          },
+          {
+            "title": "知らせる",
+            "detail": "戦略がsuccess!を返す。"
+          },
+          {
+            "title": "応答する",
+            "detail": "コントローラーでログイン後の応答。"
+          }
+        ],
+        "design": "認証の成否を戦略から通知することで、HTTP応答とパスワード検証を分離しています。呼び出し先のgemまで境界線を引くと、DeviseとWardenを同じものと誤解せず読めます。",
+        "question": "valid_password?を直接呼ぶ役割は、この通常経路ではどこですか？",
+        "answer": "database_authenticatable戦略のauthenticate!から、resourceのメソッドを呼びます。"
+      },
+      {
+        "id": "state",
+        "title": "パスワードとセッションは別の状態",
+        "lead": "照合する値と、ログイン後に持つ情報を区別します。",
+        "paragraphs": [
+          "modelのvalid_password?はDevise::Encryptor.compareへencrypted_passwordと入力されたpasswordを渡します。保存するハッシュと、入力時の平文を同じ値として扱っていません。この章は独自の暗号処理を実装する手順ではありません。",
+          "controllers/helpers.rbではmappingをscopeとしてWardenへ渡し、current_userのような現在の利用者を得ます。同じアプリにuserとadminがある場合も、scopeの区別が重要になります。",
+          "セッション保存の可否にはstrategyのstore?とskip_session_storageなどが関わります。「Deviseを使うと必ずこの形式で保存される」と一律には言えません。Cookieの内容やセッションstoreの設定まで確かめるにはアプリの設定も必要です。"
+        ],
+        "code": "# 読む対象を分けるための観察メモ\n入力: password\n保存済み: encrypted_password\n照合: valid_password?\n利用者の区分: scope (:userなど)\nログイン状態: Warden / アプリのsession設定",
+        "language": "text",
+        "sourcePath": "lib/devise/models/database_authenticatable.rb",
+        "sourceLine": 71,
+        "flow": [
+          {
+            "title": "秘密の入力",
+            "detail": "入力passwordはログへ出さない。"
+          },
+          {
+            "title": "照合",
+            "detail": "保存済みハッシュとの比較。"
+          },
+          {
+            "title": "状態の継続",
+            "detail": "scopeとsessionの設定を確認。"
+          }
+        ],
+        "design": "一回の資格情報の照合と、その後のリクエストで利用者を識別する仕組みは別の責務です。データの寿命を分けると保存場所の設計を読みやすくなります。",
+        "question": "passwordとencrypted_passwordを、そのまま同じ文字列として比較しますか？",
+        "answer": "いいえ。固定版のvalid_password?はDevise::Encryptor.compareへ渡します。"
+      },
+      {
+        "id": "design",
+        "title": "失敗の違いを外へ漏らさない",
+        "lead": "paranoid分岐から、認証処理の設計上の配慮を読みます。",
+        "paragraphs": [
+          "database_authenticatable戦略には、resourceが見つからず、まだハッシュ処理をしていないときも、Devise.paranoidが有効ならハッシュ処理を行う分岐があります。原本のコメントは利用者の存在を応答時間差から推測される問題に言及しています。",
+          "見つからないときの失敗理由も、paranoidの場合はinvalid、それ以外はnot_found_in_databaseに分かれます。内部で失敗理由を区別できることと、外側へそのまま見せることは別の判断です。",
+          "この分岐だけで全てのタイミング差や列挙の危険がなくなると保証はできません。アプリの応答、ログ、レート制限、採用版の更新状況も別に考えます。ここでは固定ソースに存在する配慮を読み取ります。"
+        ],
+        "code": "# 原本を読むための観察条件\nresourceが無い\n  ＋ ハッシュ処理がまだ無い\n  ＋ paranoidが有効\n  → ハッシュ処理を行う経路\n\n# 外部へ返す失敗理由も設定で変わる",
+        "language": "text",
+        "sourcePath": "lib/devise/strategies/database_authenticatable.rb",
+        "sourceLine": 19,
+        "flow": [
+          {
+            "title": "差を見つける",
+            "detail": "利用者なし・照合失敗の処理差。"
+          },
+          {
+            "title": "仕事を補う",
+            "detail": "paranoid時はハッシュ処理も行う。"
+          },
+          {
+            "title": "外へ返す",
+            "detail": "失敗理由の区別を調整。"
+          }
+        ],
+        "design": "正常系の短さだけでなく、失敗経路の差が何を外へ伝えるかまで見ると設計意図が見えます。安全性をひとつの条件分岐へ還元しない姿勢も必要です。",
+        "question": "paranoid分岐だけを見て「全ての認証攻撃を防げる」と言えますか？",
+        "answer": "言えません。この分岐が配慮する問題と、アプリ全体の認証・運用上の対策は別です。"
+      },
+      {
+        "id": "experiment",
+        "title": "scopeの行き先を紙に描く",
+        "lead": "実際の資格情報を使わず、ヘルパーの生成を読み解きます。",
+        "paragraphs": [
+          "controllers/helpers.rbのdefine_helpersを固定commitで開き、mapping.nameがuserの場合を紙上で展開します。authenticate_user!、current_user、user_sessionにどのscopeが渡るか書き出してください。",
+          "次にmapping.nameがadminの場合を同じように展開します。名前が似ていても、Wardenへ渡すscopeが違うことを確認します。下は読み取りを助ける擬似的な対応表で、Devise内部を差し替えるコードではありません。",
+          "実際のログイン試験では専用のローカル環境と架空の利用者だけを使い、パスワードやセッションを記録しないようにします。この教材内では資格情報の送信も実ログインも行いません。確認できるのは固定原本の生成規則です。"
+        ],
+        "code": "# define_helpersの読解結果\n:user  → authenticate_user!  → scope: :user\n:admin → authenticate_admin! → scope: :admin\n\n# current_userも: userのscopeへ\n# current_adminも: adminのscopeへ",
+        "language": "text",
+        "sourcePath": "lib/devise/controllers/helpers.rb",
+        "sourceLine": 113,
+        "flow": [
+          {
+            "title": "固定する",
+            "detail": "mapping.nameを:userにする。"
+          },
+          {
+            "title": "展開する",
+            "detail": "生成されるヘルパーとscopeを書く。"
+          },
+          {
+            "title": "比較する",
+            "detail": ":adminに変えて差を確認。"
+          }
+        ],
+        "design": "コードを動かすだけが実験ではありません。生成される名前と引数を具体化することでも、抽象的なメタプログラミングと利用者側APIの関係を確かめられます。",
+        "question": "authenticate_admin!から渡すscopeを:userと書いたら、原本の生成規則と一致しますか？",
+        "answer": "一致しません。mapping.nameがadminならscopeは:adminです。"
+      }
+    ],
+    "related": ["rails", "rspec"],
+    "version": "v4.9.4",
+    "commit": "d5a48b49dcb95941f864180296ad68683e205edc",
+    "repo": "heartcombo/devise",
+    "license": "MIT",
+    "scope": "database_authenticatableの認証経路"
+  },
+  {
+    "id": "rspec",
+    "title": "RSpec",
+    "tagline": "テストが動く、その仕組み。",
+    "summary": "rspec-coreの実行順とletの評価。テストの裏側を読みます。",
+    "domain": "testing",
+    "language": "Ruby",
+    "prerequisite": "Rubyのブロック・RSpecの基本",
+    "learning": ["定義と実行", "letの評価", "Hook"],
+    "chapters": [
+      {
+        "id": "outside",
+        "title": "describeを読んだ時、itは動く？",
+        "lead": "テストの定義と実行の時間を分けるところから始めます。",
+        "paragraphs": [
+          "この巻はrspec-core 3.13.0を対象に、テストの登録と実行、letの評価を追います。RSpecはcore、expectations、mocksなどの別gemから成り、Rails専用のテストライブラリではありません。",
+          "describeのブロックはspecファイルの読み込み時に評価され、example groupを組み立てます。itのブロックはその場で通常のテストとして実行されるのでなく、後で走るexampleとして登録されます。",
+          "下のputsを使う小さな例は、実行に外部サービスもDBも必要ありません。定義中の表示と、実行中の表示がいつ出るかを予想してから読むと、Runnerの仕事が具体的になります。"
+        ],
+        "code": "RSpec.describe \"timing\" do\n  puts \"define group\"\n\n  it \"runs later\" do\n    puts \"run example\"\n  end\nend",
+        "language": "ruby",
+        "sourcePath": "lib/rspec/core/runner.rb",
+        "sourceLine": 85,
+        "flow": [
+          {
+            "title": "読み込む",
+            "detail": "specファイルを読み込む。"
+          },
+          {
+            "title": "登録する",
+            "detail": "groupとexampleを作る。"
+          },
+          {
+            "title": "実行する",
+            "detail": "Runnerがgroupを走らせる。"
+          }
+        ],
+        "design": "定義と実行を分けることで、実行前にフィルタや順序を決められます。書かれたRubyの上から下へ、すべて同じタイミングで実行されると考えると混乱します。",
+        "question": "describe内のコードとitの本体は、必ず同じタイミングで動きますか？",
+        "answer": "いいえ。groupの定義とexampleの実行を区別します。"
+      },
+      {
+        "id": "directory",
+        "title": "RunnerからExampleへ地図を描く",
+        "lead": "テスト全体、グループ、1つの例、値の準備を分けます。",
+        "paragraphs": [
+          "runner.rbは設定とspecの読み込み、グループの実行を取りまとめます。example_group.rbはグループと子グループの実行を扱います。example.rbは1つのexampleの開始、before、本体、after、結果をつなぎます。",
+          "memoized_helpers.rbはletやsubjectの評価を読む場所です。letを単にRubyの変数宣言だと考えると、このファイルのdefine_methodとfetch_or_storeを見落とします。",
+          "expect(...).toの比較やdoubleの処理は別のgemにもまたがります。今回読んだcoreの範囲をRSpec全体の実装を解剖済みと表現しないよう、範囲を固定します。"
+        ],
+        "code": "lib/rspec/core/\n├─ runner.rb            # 全体の起動・実行\n├─ example_group.rb     # グループの実行\n├─ example.rb           # 1つの例の実行\n└─ memoized_helpers.rb  # let / subject",
+        "language": "text",
+        "sourcePath": "lib/rspec/core/runner.rb",
+        "sourceLine": 85,
+        "flow": [
+          {
+            "title": "Runner",
+            "detail": "設定・読み込み・全体実行。"
+          },
+          {
+            "title": "ExampleGroup",
+            "detail": "グループと子をたどる。"
+          },
+          {
+            "title": "Example",
+            "detail": "1つの例を実行・報告。"
+          }
+        ],
+        "design": "入れ子構造と一回の実行を分けて読むことで、before(:context)とbefore(:example)の寿命の違いも見えてきます。ファイルの分割が実行単位に対応しています。",
+        "question": "expectのマッチャーまで、すべてrspec-coreにあると考えてよいですか？",
+        "answer": "いいえ。RSpecは複数gemの組み合わせで、expectationsやmocksは別の実装です。"
+      },
+      {
+        "id": "flow",
+        "title": "before、it、afterをつなぐ",
+        "lead": "通常のexampleが走る順番と、後始末の位置を読みます。",
+        "paragraphs": [
+          "Runner#runはsetupを行い、ordered_example_groupsをrun_specsへ渡します。run_specsはreporterとsuite hookを組み合わせ、各groupのrunを呼びます。",
+          "ExampleGroup.run_examplesではexampleごとにグループのインスタンスを作り、example.run(instance, reporter)を呼びます。Example#runではaroundなどの枠の内側でrun_before_example、本体のinstance_exec、run_after_exampleをつなぎます。",
+          "afterはensureの位置に置かれています。ただしskip、dry-run、beforeでの例外などに分岐があるため、図をあらゆる状態の厳密な時系列としないでください。通常系の骨格を見たら原本のrescueとensureを読みます。"
+        ],
+        "code": "# 通常系の順序を縮めた読解メモ\nRunner#run\n  → ExampleGroup.run\n  → Example#run\n      before(:example)\n      itの本体\n      after(:example)\n  → reporterへ結果",
+        "language": "text",
+        "sourcePath": "lib/rspec/core/example.rb",
+        "sourceLine": 246,
+        "flow": [
+          {
+            "title": "準備",
+            "detail": "exampleのinstanceとreporterを用意。"
+          },
+          {
+            "title": "before",
+            "detail": "example用の前処理。"
+          },
+          {
+            "title": "本体",
+            "detail": "instance_execでブロックを実行。"
+          },
+          {
+            "title": "after",
+            "detail": "ensureから後処理へ。"
+          }
+        ],
+        "design": "本体が失敗しても後始末を行う構造はテストの分離に関わります。正常系の矢印だけでなく、例外の通り道を読み込むことで理解が深まります。",
+        "question": "afterが置かれている構文上の位置は、失敗時の理解に関係しますか？",
+        "answer": "関係します。Example#run内のensureからrun_after_exampleを呼ぶ構造を確認します。"
+      },
+      {
+        "id": "state",
+        "title": "letは、いつ値になる？",
+        "lead": "メソッド定義とexample内のメモ化を分けて読みます。",
+        "paragraphs": [
+          "letはブロックからメソッドを定義し、さらに__memoized.fetch_or_storeを通すメソッドを用意します。最初の呼び出しで計算し、同じexampleでの次の呼び出しは記録済みの値を使う仕組みです。",
+          "ExampleGroup.run_examplesは各exampleへ新しいインスタンスを作ります。そのためletの値を、全exampleに共通する1つの変数とみなすのは誤りです。ただし返した値が外部の共有オブジェクトなら、その外側の共有までは防げません。",
+          "下の例では、ひとつ目のitでtokenを2回読んでも生成のputsは1回が予想です。別のitで読むと、そのexampleでは新しく計算します。letを読むまで評価されないことも、実行時間を考えるうえで大切です。"
+        ],
+        "code": "RSpec.describe \"memoization\" do\n  let(:token) { puts \"build\"; Object.new }\n\n  it(\"uses one value\") { puts token.equal?(token) }\n  it(\"has another value\") { token }\nend",
+        "language": "ruby",
+        "sourcePath": "lib/rspec/core/memoized_helpers.rb",
+        "sourceLine": 306,
+        "flow": [
+          {
+            "title": "定義",
+            "detail": "letがメソッドを作る。"
+          },
+          {
+            "title": "初回参照",
+            "detail": "fetch_or_storeで計算・記録。"
+          },
+          {
+            "title": "再参照",
+            "detail": "同じexampleの記録を使う。"
+          }
+        ],
+        "design": "評価の遅延と、値を再利用する期間をセットで設計しています。何回呼ばれるかだけでなく、どの単位で記録が捨てられるかも読む必要があります。",
+        "question": "letのブロックは、宣言した時点で必ず実行されますか？",
+        "answer": "いいえ。通常のletは参照された時に評価され、同じexample内でメモ化されます。"
+      },
+      {
+        "id": "design",
+        "title": "let!は小さな組み合わせでできている",
+        "lead": "新しい仕組みを増やさず、既存の2つを組み合わせる設計を見ます。",
+        "paragraphs": [
+          "固定版のlet!の実装は、let(name, &block)で通常のletを定義したあと、beforeからその名前のメソッドを呼びます。遅延評価の仕組みを複製して、別のキャッシュを作っているわけではありません。",
+          "このためlet!の値もletと同じくメモ化されます。違いはexample実行前のhookで先に参照する点です。before(:context)で一度だけ作る仕組みとは異なります。",
+          "let!とbeforeが複数あるときの順序を単語だけで覚えるより、どの順でhookが登録されるかを確認すると説明できます。DBレコード作成の副作用がある場合は、必要な例だけで実行するかも考えましょう。"
+        ],
+        "code": "# 原本の考え方を示した説明用コード\nlet(:record) { build_record }\nbefore { record }\n\n# これがlet!を読むための対応関係。\n# 具体的なhookの順序は宣言位置も確認する。",
+        "language": "ruby",
+        "sourcePath": "lib/rspec/core/memoized_helpers.rb",
+        "sourceLine": 400,
+        "flow": [
+          {
+            "title": "let",
+            "detail": "メモ化ヘルパーを定義。"
+          },
+          {
+            "title": "before",
+            "detail": "example前にヘルパーを呼ぶ。"
+          },
+          {
+            "title": "本体",
+            "detail": "既に計算した値を参照できる。"
+          }
+        ],
+        "design": "新機能を既存のプリミティブの組み合わせで表すと、値の保持方法を二重に実装せずに済みます。短い実装から、変更点が評価タイミングに限られることを読めます。",
+        "question": "let!はbefore(:context)で全example共通の値を作る機能ですか？",
+        "answer": "いいえ。letを定義し、example前のbeforeで呼びます。context全体で一度とは異なります。"
+      },
+      {
+        "id": "experiment",
+        "title": "参照しないletを観察する",
+        "lead": "宣言の違いで出力がどう変わるかを、小さなspecで確かめます。",
+        "paragraphs": [
+          "rspec-core 3.13.0を使うローカル環境で下のspecを保存し、rspec timing_spec.rb --format documentationで実行します。expectationsやDBを使わず、出力だけで順番を観察できます。",
+          "最初はlet(:value)を参照していないため、valueの行は出ないと予想できます。次にletをlet!へ変えると、beforeでvalueが参照されるため、exampleの前にvalueが出るはずです。",
+          "最後にitの本体をvalue; valueへ変えます。同じexampleで生成が一度であることを確認してください。以下は実行手順と期待値で、このサイトがRubyを実行する機能ではありません。結果を原本のfetch_or_storeとbeforeへ結びつけて振り返りましょう。"
+        ],
+        "code": "RSpec.describe \"timing\" do\n  let(:value) { puts \"value\"; Object.new }\n\n  it \"does not read value\" do\n    puts \"example\"\n  end\nend\n# A: let  → exampleのみ\n# B: let! → value, exampleの順",
+        "language": "ruby",
+        "sourcePath": "lib/rspec/core/memoized_helpers.rb",
+        "sourceLine": 400,
+        "flow": [
+          {
+            "title": "予想",
+            "detail": "未参照のletは動くか。"
+          },
+          {
+            "title": "変更",
+            "detail": "letをlet!に変更。"
+          },
+          {
+            "title": "照合",
+            "detail": "beforeとメモ化へ戻って説明。"
+          }
+        ],
+        "design": "1箇所だけ変えると、結果の差を評価タイミングへ結びつけられます。大きなアプリで起きるテスト準備の問題も、小さな実行単位へ落とすと追いやすくなります。",
+        "question": "未参照のletをlet!へ変えたとき、valueの出力はどこに追加される予想ですか？",
+        "answer": "example本体より前です。let!が登録するbeforeから参照されます。"
+      }
+    ],
+    "related": ["rails", "devise"],
+    "version": "v3.13.0",
+    "commit": "c8e7269707ddb1ac45576752a051aa36ddf5fd04",
+    "repo": "rspec/rspec-core",
+    "license": "MIT",
+    "scope": "rspec-coreのexample実行とlet"
+  }
+]

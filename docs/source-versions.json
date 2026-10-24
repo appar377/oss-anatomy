@@ -1,0 +1,30 @@
+[
+  {
+    "id": "react",
+    "repo": "facebook/react",
+    "tag": "v19.2.0",
+    "commit": "ae74234eae6ebd62f19190731278e20bc1c37d51",
+    "error": null
+  },
+  {
+    "id": "rails",
+    "repo": "rails/rails",
+    "tag": "v8.1.0",
+    "commit": "1cdd190a25e483b65f1f25bbd0f13a25d696b461",
+    "error": null
+  },
+  {
+    "id": "devise",
+    "repo": "heartcombo/devise",
+    "tag": "v4.9.4",
+    "commit": "d5a48b49dcb95941f864180296ad68683e205edc",
+    "error": null
+  },
+  {
+    "id": "rspec",
+    "repo": "rspec/rspec-core",
+    "tag": "v3.13.0",
+    "commit": "c8e7269707ddb1ac45576752a051aa36ddf5fd04",
+    "error": null
+  }
+]

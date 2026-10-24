@@ -1,0 +1,109 @@
+---
+title: "DartのcopyWithでnullを正しく扱うためのSentinel Pattern"
+description: "copyWithで「指定なし」「nullへの変更」「値の変更」を区別する。privateなsentinelとsealedな更新型を比較し、Object?へ型を広げる代償も確認する。"
+date: 2026-07-20
+tags:
+  - "Dart"
+  - "Copywith"
+  - "Null Safety"
+  - "Sentinel Pattern"
+  - "Immutability"
+category: "Flutter"
+level: 2
+articleType: reference
+draft: false
+thumbnail: "/images/articles/dart-copywith-sentinel-pattern.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+`copyWith({String? nickname})`では、引数を省略したときも、`nickname: null`を渡したときも、関数の中では`null`を受け取ります。`nickname ?? this.nickname`と書くと値を維持できますが、明示的にnullへ戻す操作ができません。
+
+必要なのは、値の候補を増やすことではなく、「変更しない」という操作を値から分けることです。[名前付き引数の既定値](https://dart.dev/language/functions#named-parameters)を使って、三つのケースを表現します。
+
+| 呼び出し | 意図 |
+| --- | --- |
+| `copyWith()` | 現在の値を維持する |
+| `copyWith(nickname: null)` | 値をnullへ変更する |
+| `copyWith(nickname: 'Haru')` | 新しい文字列へ変更する |
+
+## privateな型を「指定なし」の目印にする
+
+```dart
+final class _Unchanged {
+  const _Unchanged();
+}
+const _unchanged = _Unchanged();
+
+class Profile {
+  const Profile(this.nickname);
+  final String? nickname;
+
+  Profile copyWith({Object? nickname = _unchanged}) => Profile(
+    identical(nickname, _unchanged)
+        ? this.nickname
+        : nickname as String?,
+  );
+}
+
+void main() {
+  const profile = Profile('Aki');
+  print(profile.copyWith().nickname); // Aki
+  print(profile.copyWith(nickname: null).nickname); // null
+  print(profile.copyWith(nickname: 'Haru').nickname); // Haru
+}
+```
+
+未指定のときだけ`_unchanged`を受け取り、それ以外はnullを含めて更新値として使います。既定値はコンパイル時定数である必要があるため、ここではconst constructorを持つ専用の型を使っています。Dartの`_`から始まる名前はライブラリ内でprivateです。同じライブラリ内のコードまでアクセスを禁止するものではありません。[ライブラリと可視性](https://dart.dev/language/libraries)
+
+比較に使うのは`==`ではなく`identical`です。ただし、`const Object()`を「呼び出すたびに新しくなる目印」と説明するのは誤りです。同じ定数オブジェクトは共有されるため、`identical(const Object(), const Object())`はtrueになります。専用のprivate型にすることで、通常の更新値と目印を分けます。[identicalのAPI](https://api.dart.dev/dart-core/identical.html)
+
+## Object?に広げた分、誤った型は実行時まで通る
+
+この実装には代償があります。`copyWith(nickname: 123)`も引数の型には適合し、`as String?`の箇所で実行時エラーになります。キャストをヘルパーへ移しても、呼び出し側の型検査は強くなりません。
+
+小さな内部モデルならこの制約を受け入れられることもありますが、広く使うAPIでは、更新操作を型にした方が意図を保ちやすくなります。
+
+## 更新操作を型で包めば、値の型を維持できる
+
+```dart
+sealed class Change<T> {
+  const Change();
+}
+final class Keep<T> extends Change<T> {
+  const Keep();
+}
+final class SetValue<T> extends Change<T> {
+  const SetValue(this.value);
+  final T value;
+}
+
+class TypedProfile {
+  const TypedProfile(this.nickname);
+  final String? nickname;
+
+  TypedProfile copyWith({
+    Change<String?> nickname = const Keep<String?>(),
+  }) => TypedProfile(switch (nickname) {
+    Keep<String?>() => this.nickname,
+    SetValue<String?>(:final value) => value,
+  });
+}
+
+void main() {
+  const profile = TypedProfile('Aki');
+  print(profile.copyWith().nickname); // Aki
+  print(profile.copyWith(nickname: const SetValue<String?>(null)).nickname);
+  print(profile.copyWith(nickname: const SetValue<String?>('Haru')).nickname);
+}
+```
+
+後の二行はそれぞれ`null`、`Haru`になります。`SetValue<String?>(123)`は値の型に合わず、解析段階で検出されます。`Keep`と`SetValue`の分岐にはDart 3のsealed classとパターンを使っています。[sealedの説明](https://dart.dev/language/class-modifiers#sealed)
+
+呼び出しは長くなりますが、「変更しない」と「nullに変更する」が型として区別されます。これは単に値の有無を表す型より、今回の更新操作に直接対応する表現です。
+
+## モデルが増えるなら、生成コードの契約も確認する
+
+Freezedの`copyWith`は、省略した値を維持し、nullableなフィールドへ明示的にnullを渡す操作も扱います。すでに導入しているプロジェクトでは、独自のsentinelを重ねる前に生成されたAPIを確認できます。この記事ではFreezedの生成処理は実行せず、[公式パッケージのcopyWith説明](https://pub.dev/packages/freezed#how-copywith-works)を参照しています。
+
+手書きの二方式はDart SDK 3.11.5で実行し、省略・null・文字列の三ケースを確認しました。sentinel方式へ数値を渡した場合の実行時エラーも確認しています。更新項目が増えたときは、一律にすべてをcopyWithへ足す前に、「表示名の変更」など用途ごとの操作に分けられないかも検討できます。

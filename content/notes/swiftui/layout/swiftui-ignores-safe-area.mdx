@@ -1,0 +1,146 @@
+---
+title: "SwiftUIのignoresSafeAreaはどのViewに付けるか"
+description: "背景だけを広げる例から、containerとkeyboard、edgesの違いを整理します。Safe Areaの型の確認と、端末で必要なレイアウト検証を分けます。"
+date: 2026-07-20
+tags:
+  - "SwiftUI"
+  - "Safe Area"
+  - "Ignores Safe Area"
+  - "Layout"
+category: "SwiftUI"
+level: 2
+articleType: reference
+draft: false
+thumbnail: "/images/articles/swiftui-ignores-safe-area.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+背景色を画面の端まで広げたいだけなら、まず背景のViewに`ignoresSafeArea`を付けます。入力欄やボタンを含む親全体に付けると、それらがシステムUIの領域へ入ることも許すため、目的が変わります。
+
+Safe Areaは端末に一つだけ固定された余白ではありません。システムの領域や、そのViewを包むコンテナを踏まえたレイアウト上の領域です。背景、操作要素、キーボードへの対応を、同じ指定で済ませようとしないことが出発点になります。[Apple: Add rich graphics to your SwiftUI app](https://developer.apple.com/videos/play/wwdc2021/10021/)
+
+## 背景だけを広げると、コードはどうなりますか？
+
+メモ入力画面を例にします。`Color`だけがcontainer由来のSafe Areaを無視します。入力欄は通常のレイアウトに置き、保存ボタンは下側の`safeAreaInset`に配置します。
+
+```swift file=safe-area/NoteEditor.swift
+import SwiftUI
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+struct SafeAreaNoteEditor: View {
+    @State private var draft = ""
+    @State private var saved = ""
+
+    var body: some View {
+        ZStack {
+            Color.indigo.opacity(0.15)
+                .ignoresSafeArea(.container, edges: .all)
+
+            VStack(alignment: .leading, spacing: 16) {
+                Text("メモ")
+                    .font(.title)
+                TextField("内容", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                Text(saved.isEmpty ? "未保存" : "保存内容: \(saved)")
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding()
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack {
+                Spacer()
+                Button("保存") {
+                    saved = draft
+                }
+                .disabled(draft.isEmpty)
+            }
+            .padding()
+            .background(.regularMaterial)
+        }
+    }
+}
+```
+
+`safeAreaInset`は、指定した端に内容を配置し、その内容が占める領域をレイアウトに反映するためのAPIです。単純に下端へ`overlay`した場合とは、ほかの内容が使う領域の扱いが異なります。この例のボタンが、あらゆる親Viewやキーボード設定で必ず見えることまで保証するわけではありません。[Apple: safeAreaInset](https://developer.apple.com/documentation/swiftui/view/safeareainset(edge:alignment:spacing:content:)-4s51l)
+
+`.padding()`は内容に余白を加える指定です。端末ごとのSafe Areaの数値を代用する指定ではありません。また、背景を広げても`TextField`の値や保存処理の意味は変わりません。見た目と状態更新を分けて読むと、modifierの影響範囲を追いやすくなります。
+
+## container・keyboardと、top・bottomは何が違うのですか？
+
+`ignoresSafeArea`の第1引数は、無視するSafe Areaの種類です。`edges:`は、影響させる辺です。引数を省略した場合は、regionsもedgesも`.all`になります。[Apple: ignoresSafeArea](https://developer.apple.com/documentation/swiftui/view/ignoressafearea(_:edges:))
+
+| 指定 | 選ぶもの | この例での判断 |
+| --- | --- | --- |
+| `.container` | デバイスやコンテナ側のSafe Area | 背景を端まで広げる対象 |
+| `.keyboard` | ソフトウェアキーボードの領域 | 入力欄があるので、無視を既定にしない |
+| `.all` | 両方のregion | 意図せずキーボード対応も外さないか確認する |
+| `edges: .bottom` | 下側の辺 | 第1引数のregionとは別に選ぶ |
+
+この区別は型にも現れます。次は意図したコンパイルエラーの例です。正常な画面コードとは別に保存します。
+
+```swift expected-diagnostic file=expected-diagnostics/WrongSafeAreaRegion.swift
+import SwiftUI
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+struct WrongSafeAreaRegion: View {
+    var body: some View {
+        Color.indigo.ignoresSafeArea(.bottom)
+    }
+}
+```
+
+第1引数に必要なのは`SafeAreaRegions`なので、そこに`.bottom`はありません。下辺を選びたいなら`edges:`に渡します。型が合わない問題と、画面が期待どおりに見えるかという問題は分けて確認します。
+
+## keyboardを無視すれば、入力中のレイアウトを固定できますか？
+
+次は比較のため、先ほどの画面全体でキーボード由来の下側のSafe Areaを無視する例です。
+
+```swift file=safe-area/KeyboardComparison.swift
+import SwiftUI
+
+// A deliberate opt-out for comparison, not the default editor policy.
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+struct KeyboardIgnoringEditor: View {
+    var body: some View {
+        SafeAreaNoteEditor()
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
+}
+```
+
+この指定はキーボードを閉じる命令ではありません。キーボードの領域をレイアウト上で避けるかどうかの指定です。入力内容やボタンが隠れる可能性を含めて判断します。[Apple: SafeAreaRegions](https://developer.apple.com/documentation/swiftui/safearearegions)
+
+また、`ignoresSafeArea`は任意のViewを必ず画面全体へ引き伸ばす指定でもありません。親から提案された領域や、子が実際に占める大きさの影響を受けます。指定するViewを変えるたびに、同じキーボード表示の効果が得られるとは限りません。
+
+背景だけを広げる最初の例を基準にして、入力欄にフォーカスしたときの変化を比較します。キーボードを無視する必要がある画面では、隠れてよい内容と、操作可能なまま残す内容を先に決めます。
+
+## NavigationStackやsheetでも同じ余白になりますか？
+
+ナビゲーションバー、タブバー、sheetなどのコンテナが変われば、ViewにとってのSafe Areaの条件も変わります。画面上端からの固定ピクセル値を足して合わせると、別の表示条件にその値を持ち込んでしまいます。
+
+`GeometryProxy.safeAreaInsets`で読めるのは、そのコンテナViewのSafe Areaのinsetsです。どこに置いた`GeometryReader`でも端末全体の共通値が取れる、という使い方はしません。測定した階層と、modifierを適用した階層をセットで確認します。[Apple: GeometryProxy.safeAreaInsets](https://developer.apple.com/documentation/swiftui/geometryproxy/safeareainsets)
+
+古いコードの`edgesIgnoringSafeArea`は、辺を指定するAPIです。ここで扱うregionの区別を明示したいときは`ignoresSafeArea`の引数に置き換えて意図を表します。SDK 26.5にも旧APIの宣言はあり、特定の古いOSで削除されたとは扱いません。
+
+## コンパイルで確認できることと、画面で確認することは？
+
+例全体はiOS 17 / macOS 14以降を対象にしています。API単体の導入時期は、`ignoresSafeArea`がiOS 14 / macOS 11、`safeAreaInset`がiOS 15 / macOS 12です。今回参照したSDK 26.5の宣言でも、このavailabilityを確認しています。
+
+検証用CLIの前提はApple Swift 6.3.3、macOS SDK 26.5、deployment target `arm64-apple-macosx26.0`です。Swift言語モード6、strict concurrencyはcomplete、既定の隔離はnonisolatedとし、Viewの型には明示的に`@MainActor`を付けています。正常2ファイルのtypecheckは成功し、誤ったregion指定は`SafeAreaRegions`に`bottom`がないという診断になることを確認しました。
+
+macOSでtypecheckが通っても、iPhoneのキーボードやホームインジケーター周辺の見え方は確認できません。画面検証には、少なくとも次の条件を残しています。
+
+| 未確認の条件 | 確認する内容 |
+| --- | --- |
+| 縦向き・横向き、文字サイズ変更 | 背景の端と、入力・保存操作の見える範囲 |
+| キーボードの表示・非表示 | 通常例とkeyboardを無視した例の差 |
+| NavigationStack / TabView内 | バーと内容、下側insetの関係 |
+| sheet内、sheetの大きさの変化 | コンテナの領域が変わったときの配置 |
+
+Simulator・実機での表示、フォーカス、タップの確認は未実施です。Viewの状態の持ち方は、[SwiftUIの状態とidentityの比較](/notes/flutter/swiftui/flutter-engineer-learning-swiftui/)で別に扱います。

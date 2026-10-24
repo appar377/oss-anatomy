@@ -1,0 +1,145 @@
+---
+title: "Railsのwith_lockは何を待たせるか — PostgreSQLの行ロックで確かめる"
+description: "with_lockが発行するSELECT FOR UPDATEを、PostgreSQLの別接続で確認する。通常のSELECT、ロック待ち、NOWAIT、タイムアウト、存在しない行、デッドロックを分けて扱う。"
+date: 2026-07-20
+tags:
+  - "Rails"
+  - "SQL"
+  - "Pessimistic Locking"
+  - "Transactions"
+category: "Rails"
+level: 3
+articleType: internal
+draft: false
+thumbnail: "/images/articles/rails-pessimistic-locking-select-for-update.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+在庫が1個のとき、二つの処理がどちらも「1個ある」と読んでから減らすと、読み取りと更新の間で競合します。`with_lock` を使うなら、ロックした後に在庫数を読み、減らす判断と保存までを同じtransactionに収めます。
+
+ロックを管理するのはDBです。同じDBの同じ行を扱う別接続に効くため、アプリのプロセスが違っても対象になります。Rubyの変数や、外部APIを含む処理全体に排他制御が掛かるわけではありません。
+
+以下は説明用の在庫モデルです。Ruby 3.4.4、Active Record 8.1.3、pg 1.6.3、PostgreSQL 17.10のREAD COMMITTEDで確認しました。`stock_items.quantity` はNULLを許さないintegerです。MySQLやSQLiteのロック挙動には一般化しません。
+
+## ロック、読み取り、更新を一つの範囲に収める
+
+```ruby
+class StockItem < ActiveRecord::Base
+  def take_one!
+    with_lock do
+      raise 'out of stock' if quantity < 1
+
+      update!(quantity: quantity - 1)
+    end
+  end
+end
+```
+
+`with_lock` はtransactionを開始し、対象インスタンスを `lock!` で読み直してからblockを実行します。`lock!` だけを使う場合は、読み取りから更新までを自分でtransactionに入れます。[Rails 8.1.3の実装](https://api.rubyonrails.org/v8.1.3/classes/ActiveRecord/Locking/Pessimistic.html)でこの順序を確認できます。
+
+```ruby
+item = StockItem.create!(quantity: 2)
+StockItem.transaction do
+  item.lock!
+  item.update!(quantity: item.quantity - 1)
+end
+item.reload.quantity # => 1
+```
+
+`take_one!` の実行で捕捉したSQLは次の順でした。値はprepared statementの引数なので、ログ中では `$1` などになっています。
+
+```sql
+BEGIN
+SELECT "stock_items".* FROM "stock_items" WHERE "stock_items"."id" = $1 LIMIT $2 FOR UPDATE
+UPDATE "stock_items" SET "quantity" = $1 WHERE "stock_items"."id" = $2
+COMMIT
+```
+
+通常、行ロックはtransactionが終了するまで保持されます。外側にtransactionがあれば、`with_lock` のblockを抜けても、その外側のcommitやrollbackまでが保持範囲になります。savepointへのrollbackでは、その後に得たロックが解放される場合があります。[PostgreSQLの明示的ロック](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS)を参照してください。
+
+## 別接続の何が待つのか
+
+同じ行に `FOR UPDATE` を取得した接続Aがあるとき、接続Bで次を確認しました。テーブル全体を排他的にロックするDDLは含めていません。
+
+| 接続Bの操作 | 結果 |
+| --- | --- |
+| 通常の `SELECT` | Aの未commit値ではなく、読めるcommit済みの値を取得 |
+| 同じ行の `SELECT ... FOR UPDATE` | Aのロック解放を待つ |
+| `FOR UPDATE NOWAIT` | 待機せず、ロック取得失敗になる |
+| `lock_timeout` を短く設定して同じ行をロック | 待機後、タイムアウトになる |
+
+READ COMMITTEDでは、ロック待ちの後に更新された行を読み直します。REPEATABLE READやSERIALIZABLEでは、同じ条件でも変更との競合がエラーになる場合があります。[分離レベルごとの仕様](https://www.postgresql.org/docs/17/transaction-iso.html)と、使用中の設定を合わせて確認します。
+
+次は2スレッドがそれぞれ別接続を借り、2個の在庫を1個ずつ減らす例です。`Queue` で双方の準備を待ってから開始します。上のモデル定義と、少なくとも2接続を貸し出せるconnection poolが必要です。
+
+```ruby
+item = StockItem.create!(quantity: 2)
+ready = Queue.new
+start = Queue.new
+workers = Array.new(2) do
+  Thread.new do
+    ActiveRecord::Base.connection_pool.with_connection do |connection|
+      ready << connection.select_value('SELECT pg_backend_pid()')
+      raise 'start timeout' unless start.pop(timeout: 3)
+      StockItem.find(item.id).take_one!
+    end
+  end
+end
+pids = Array.new(2) { ready.pop(timeout: 3) }
+raise 'connection timeout' if pids.any?(&:nil?)
+2.times { start << true }
+workers.each do |worker|
+  raise 'worker timeout' unless worker.join(5)
+  worker.value
+end
+pids.uniq.size # => 2
+item.reload.quantity # => 0
+```
+
+この短い例だけでは、どちらがどれだけ待ったかまでは分かりません。別の検証では、先行接続がロックを保持したまま後続を開始し、`pg_blocking_pids` で待機を確認してから先行側をcommitしました。固定時間のsleepが過ぎたことを、待機の証拠にはしていません。
+
+## 待てない処理では、失敗の扱いも決める
+
+`NOWAIT` は、ロックされた行を飛ばす指定ではありません。取得できなければそのstatementが失敗します。[SELECTのロック句](https://www.postgresql.org/docs/17/sql-select.html#SQL-FOR-UPDATE-SHARE)で `SKIP LOCKED` との違いも確認できます。
+
+`lock_timeout` はロックを待つ時間の上限です。検証ではtransaction内で `SET LOCAL lock_timeout = '100ms'` を設定し、待機中の取得が失敗することを確認しました。この値は説明用で、運用推奨値ではありません。[設定の適用範囲](https://www.postgresql.org/docs/17/runtime-config-client.html#GUC-LOCK-TIMEOUT)と通常の応答時間から決めます。
+
+この環境では、NOWAIT失敗とlock timeoutをRailsの `ActiveRecord::LockWaitTimeout`、PostgreSQLのSQLSTATE `55P03` として観測しました。DBエラーはtransactionの外で受け、必要ならtransaction全体をやり直します。回数無制限の再試行や、失敗したtransactionの中で続きを実行する設計にはしません。
+
+## 行が存在しなければ、その行はロックできない
+
+`StockItem.lock.find_by(id: missing_id)` が `nil` を返しても、そのIDでの後続INSERTを防いだことにはなりません。検証では、そのtransactionを開いたまま別接続から同じIDをINSERTできました。
+
+「まだない組み合わせを一つだけ作る」要件には、一意制約など別の仕組みが必要です。既存の親行を共通のロック対象にする設計もありますが、全経路で同じ規則を守る必要があります。
+
+## 複数行を扱うなら、取得順を揃える
+
+Aが商品1を保持して商品2を待ち、Bが商品2を保持して商品1を待つと、デッドロックになります。2接続でこの順序を作ると、一方が `ActiveRecord::Deadlocked` になり、もう一方はcommitできました。どちらを中断するかを前提にしてはいけません。
+
+次の説明用メソッドは、移動の向きに関係なくID昇順でロックします。前のモデルに追加します。
+
+```ruby
+class StockItem < ActiveRecord::Base
+  def self.move_one!(from_id, to_id)
+    raise ArgumentError, 'different items required' if from_id == to_id
+
+    transaction do
+      rows = [from_id, to_id].sort.map { |id| lock.find(id) }
+      source = rows.find { |row| row.id == from_id }
+      destination = rows.find { |row| row.id == to_id }
+      raise 'out of stock' if source.quantity < 1
+
+      source.update!(quantity: source.quantity - 1)
+      destination.update!(quantity: destination.quantity + 1)
+    end
+  end
+end
+```
+
+同じ順序を他の更新経路でも採用することで、この逆順による待ち合わせを避けられます。callbackや別テーブルを含むすべてのデッドロックを、このメソッドだけで排除できるわけではありません。外部APIやファイル転送をロック中に実行すると保持時間が延びるため、必要なDB更新に範囲を絞ります。
+
+行を読む前から排他制御する必要が薄い場面では、`lock_version` を使う楽観的ロックも候補です。古い版による保存を `ActiveRecord::StaleObjectError` として検出し、その後の競合解消をアプリが決めます。[Rails 8.1.3の公式実装](https://github.com/rails/rails/blob/v8.1.3/activerecord/lib/active_record/locking/optimistic.rb)が根拠です。悲観・楽観のどちらが速いかは、競合頻度や処理時間を測らずには決められません。
+
+ここで確認したのはローカルPostgreSQLの別接続です。別Pod、ネットワーク切断、DB製品差、本番の性能は測定していません。`with_lock` の再読込がRuby側の変更情報に与える影響は[インスタンスの比較](/notes/rails/active_record/with-lock-after-commit-dirty-tracking/)に続きます。

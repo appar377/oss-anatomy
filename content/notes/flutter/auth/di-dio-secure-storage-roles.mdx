@@ -1,0 +1,116 @@
+---
+title: "DI・Dio・Secure Storageは、それぞれ何を担当するのか"
+description: "DIは依存の受け渡し、DioはHTTP通信、Secure Storageは保存を担当する。コンストラクターで組み立てる例とfakeのテストから、差し替える境界を確認します。"
+date: 2026-07-20
+tags:
+  - "Flutter"
+  - "Dart"
+  - "Dependency Injection"
+  - "Dio"
+  - "Secure Storage"
+category: "Flutter"
+level: 2
+articleType: practical
+draft: false
+thumbnail: "/images/articles/di-dio-secure-storage-roles.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+`AccountRepository(Dio(), SecureTokenStorage(...))`のようなコードには、オブジェクトの組み立て方と、通信・保存の実装が同時に登場します。名前が似ていても、DIとDioは別のものです。どの処理を誰に任せるかを分けると、コードを追いやすくなります。
+
+- **DI（Dependency Injection）**は、使うオブジェクトを外から渡す設計です。特定のFlutterパッケージ名ではありません。
+- **Dio**はHTTPクライアントです。要求の送信、応答、タイムアウト、interceptorなどを扱います。
+- **FlutterSecureStorage**は、対応プラットフォームの仕組みを使って値を保存・読み出しするプラグインです。HTTP通信やログイン判定は担当しません。
+
+コンストラクターで依存を渡す方法は[FlutterのDependency injection](https://docs.flutter.dev/app-architecture/case-study/dependency-injection)でも使われています。まずは専用のDIコンテナを加えず、この形で責務を見ます。
+
+以下はFlutter 3.41.9、Dart SDK 3.11.5、Dio 5.9.2、flutter_secure_storage 10.3.1の説明用コードです。保存と通信をfakeに置き換えて確認し、実アカウントや本物の認証情報は使っていません。
+
+## 保存の入口を小さなインターフェースにする
+
+アプリ側で必要なのがRefresh Token一つの読み書きと削除なら、その操作だけをインターフェースにします。OSごとの設定やプラグインのAPIは、実装クラスに置きます。
+
+```dart
+import 'package:dio/dio.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+abstract interface class RefreshCredentialStore {
+  Future<String?> read();
+  Future<void> write(String value);
+  Future<void> delete();
+}
+
+class SecureRefreshCredentialStore implements RefreshCredentialStore {
+  SecureRefreshCredentialStore(this._storage);
+  final FlutterSecureStorage _storage;
+  static const _key = 'example.refresh-token';
+  @override
+  Future<String?> read() => _storage.read(key: _key);
+  @override
+  Future<void> write(String value) => _storage.write(key: _key, value: value);
+  @override
+  Future<void> delete() => _storage.delete(key: _key);
+}
+```
+
+`SecureRefreshCredentialStore`は処理を自作の暗号化に置き換えるものではなく、`FlutterSecureStorage`へ委譲するadapterです。Dartの`Future`が返ることと、OSでどのように保護されるかは別の話です。後者は[flutter_secure_storage 10.3.1の対応環境と設定](https://pub.dev/packages/flutter_secure_storage/versions/10.3.1)を確認します。
+
+この例のキーは単一アカウントを想定しています。複数アカウントを扱うなら、どのアカウントの値かを区別するキーや、その切替処理が必要です。保存先を選ぶ理由や起動時の復元は、[Access TokenとRefresh Tokenの保存方針](/notes/flutter/auth/access-token-memory-refresh-token-secure-storage/)で扱います。
+
+## Repositoryは受け取った依存を使う
+
+次のRepositoryにはDioと保存用インターフェースを外から渡します。内部で`Dio()`や`FlutterSecureStorage()`を新しく作らないため、同じ操作をfakeでも確かめられます。
+
+```dart
+class AccountRepository {
+  AccountRepository(this._dio, this._credentials);
+  final Dio _dio;
+  final RefreshCredentialStore _credentials;
+
+  // 保存の有無だけを調べる。有効なログインとは判定しない。
+  Future<bool> hasSavedCredential() async => await _credentials.read() != null;
+
+  Future<String> fetchDisplayName(String accessToken) async {
+    if (accessToken.isEmpty) throw ArgumentError('accessToken is empty');
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/me',
+      options: Options(headers: {'Authorization': 'Bearer $accessToken'}),
+    );
+    final name = response.data?['name'];
+    if (name is! String) throw const FormatException('name must be a string');
+    return name;
+  }
+
+  Future<void> forgetSavedCredential() => _credentials.delete();
+}
+```
+
+`fetchDisplayName`には、呼び出し側が現在のAccess Tokenを渡します。保存したRefresh Tokenを毎回読み、そのまま通常のAPIへ送る構成にはしていません。`/me`、応答の`name`、後述のテスト用トークンは説明用のAPI契約です。
+
+Dioが返す応答をRepository内で確認し、呼び出し側へは表示名の`String`を返します。Dioの基本設定や要求ごとの`Options`は[Dio 5.9.2のドキュメント](https://pub.dev/packages/dio/versions/5.9.2)で確認できます。この例にはtoken refresh、401の再送、複数APIへの送信規則は含めていません。
+
+また、`hasSavedCredential()`が`true`でも、有効なログインがあるとは判定できません。保存値が失効している場合もあります。`forgetSavedCredential()`も端末の保存値を消す操作で、サーバー上のセッション失効やメモリのAccess Token削除まで行うログアウト処理ではありません。
+
+## 具象クラスを選ぶ場所をまとめる
+
+アプリを組み立てる場所では、使うDioとストレージを受け取り、Repositoryへ渡します。
+
+```dart
+AccountRepository wireAccountRepository(Dio dio, FlutterSecureStorage storage) {
+  return AccountRepository(dio, SecureRefreshCredentialStore(storage));
+}
+```
+
+この時点で、DioやSecure Storageの具象クラスを使うのは自然です。必要なのは、各画面がその都度別のクライアントを作り、設定や寿命がばらばらになることを避けることです。Dioを作った側は、不要になったときに`close()`する責任も持ちます。
+
+ProviderやRiverpodを使う場合も、生成した依存をどこへ渡すかという基本は同じです。Riverpodには購読・再計算・破棄もあるので、単に「DIの別名」として扱うと、状態の寿命を見落とします。[Providerの生成と実行時の役割](/notes/flutter/architecture/riverpod-generated-provider-code/)も合わせて確認すると、組み立てと状態更新を分けられます。
+
+すべてのクラスにインターフェースを作る必要はありません。ここでは保存実装をfakeへ替える境界に一つ置きました。業務層からHTTP実装のRepositoryも隠したい場合は、業務操作を表すインターフェースを別に設ける、という順番で増やせます。
+
+## fakeで確認できることと、実機が必要なこと
+
+検証ではメモリ上の保存実装と、固定JSONを返すDio adapterを注入しました。確認したのは、保存の有無と対象値の削除、Access Tokenが要求に使われること、空のtokenの送信拒否、不正な応答の拒否、保存値の削除失敗が呼び出し側へ伝わることの5件です。
+
+このテストはOSの暗号化、Keychainのアクセス条件、端末のバックアップ、実HTTPを検証していません。DIによってそれらの仕組みが安全になるわけではなく、アプリの判断を外部処理と切り離して検証できるようにしています。

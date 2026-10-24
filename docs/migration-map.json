@@ -1,0 +1,132 @@
+[
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/architecture/execution-model/execution-model-over-syntax/",
+    "new": "/notes/architecture/execution-model/execution-model-over-syntax/",
+    "source": "articles/architecture/execution-model/execution-model-over-syntax.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/architecture/execution-model/framework-api-abstraction-leaks/",
+    "new": "/notes/architecture/execution-model/framework-api-abstraction-leaks/",
+    "source": "articles/architecture/execution-model/framework-api-abstraction-leaks.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/architecture/execution-model/identity-equality-ruby-dart-swift/",
+    "new": "/notes/architecture/execution-model/identity-equality-ruby-dart-swift/",
+    "source": "articles/architecture/execution-model/identity-equality-ruby-dart-swift.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/architecture/dio-cancel-token-lifecycle/",
+    "new": "/notes/flutter/architecture/dio-cancel-token-lifecycle/",
+    "source": "articles/flutter/architecture/dio-cancel-token-lifecycle.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/architecture/repository-save-create-update-design/",
+    "new": "/notes/flutter/architecture/repository-save-create-update-design/",
+    "source": "articles/flutter/architecture/repository-save-create-update-design.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/architecture/riverpod-generated-provider-code/",
+    "new": "/notes/flutter/architecture/riverpod-generated-provider-code/",
+    "source": "articles/flutter/architecture/riverpod-generated-provider-code.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/auth/access-token-memory-refresh-token-secure-storage/",
+    "new": "/notes/flutter/auth/access-token-memory-refresh-token-secure-storage/",
+    "source": "articles/flutter/auth/access-token-memory-refresh-token-secure-storage.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/auth/di-dio-secure-storage-roles/",
+    "new": "/notes/flutter/auth/di-dio-secure-storage-roles/",
+    "source": "articles/flutter/auth/di-dio-secure-storage-roles.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/dart/dart-copywith-sentinel-pattern/",
+    "new": "/notes/flutter/dart/dart-copywith-sentinel-pattern/",
+    "source": "articles/flutter/dart/dart-copywith-sentinel-pattern.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/dart/dart-future-async-await/",
+    "new": "/notes/flutter/dart/dart-future-async-await/",
+    "source": "articles/flutter/dart/dart-future-async-await.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/dart/dart-identity-equality-hashcode-equatable/",
+    "new": "/notes/flutter/dart/dart-identity-equality-hashcode-equatable/",
+    "source": "articles/flutter/dart/dart-identity-equality-hashcode-equatable.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/flutter/swiftui/flutter-engineer-learning-swiftui/",
+    "new": "/notes/flutter/swiftui/flutter-engineer-learning-swiftui/",
+    "source": "articles/flutter/swiftui/flutter-engineer-learning-swiftui.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/active_record/active-record-dirty-tracking-lifecycle/",
+    "new": "/notes/rails/active_record/active-record-dirty-tracking-lifecycle/",
+    "source": "articles/rails/active_record/active-record-dirty-tracking-lifecycle.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/active_record/after-commit-business-workflow/",
+    "new": "/notes/rails/active_record/after-commit-business-workflow/",
+    "source": "articles/rails/active_record/after-commit-business-workflow.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/active_record/dirty-tracking-saved-change/",
+    "new": "/notes/rails/active_record/dirty-tracking-saved-change/",
+    "source": "articles/rails/active_record/dirty-tracking-saved-change.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/active_record/rails-pessimistic-locking-select-for-update/",
+    "new": "/notes/rails/active_record/rails-pessimistic-locking-select-for-update/",
+    "source": "articles/rails/active_record/rails-pessimistic-locking-select-for-update.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/active_record/with-lock-after-commit-dirty-tracking/",
+    "new": "/notes/rails/active_record/with-lock-after-commit-dirty-tracking/",
+    "source": "articles/rails/active_record/with-lock-after-commit-dirty-tracking.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/active_record/with-lock-dirty-tracking-after-commit/",
+    "new": "/notes/rails/active_record/with-lock-dirty-tracking-after-commit/",
+    "source": "articles/rails/active_record/with-lock-dirty-tracking-after-commit.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/data/db-s3-transaction-boundary/",
+    "new": "/notes/rails/data/db-s3-transaction-boundary/",
+    "source": "articles/rails/data/db-s3-transaction-boundary.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/rspec/real-vs-mock-boundary/",
+    "new": "/notes/rails/rspec/real-vs-mock-boundary/",
+    "source": "articles/rails/rspec/real-vs-mock-boundary.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/rspec/request-spec-vs-controller-spec/",
+    "new": "/notes/rails/rspec/request-spec-vs-controller-spec/",
+    "source": "articles/rails/rspec/request-spec-vs-controller-spec.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/rspec/stub-mock-fake-by-purpose/",
+    "new": "/notes/rails/rspec/stub-mock-fake-by-purpose/",
+    "source": "articles/rails/rspec/stub-mock-fake-by-purpose.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/rspec/stub-mock-meaning/",
+    "new": "/notes/rails/rspec/stub-mock-meaning/",
+    "source": "articles/rails/rspec/stub-mock-meaning.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/rails/rspec/test-duplication-across-layers/",
+    "new": "/notes/rails/rspec/test-duplication-across-layers/",
+    "source": "articles/rails/rspec/test-duplication-across-layers.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/swift/concurrency/swift-nonisolated-actor-isolation/",
+    "new": "/notes/swift/concurrency/swift-nonisolated-actor-isolation/",
+    "source": "articles/swift/concurrency/swift-nonisolated-actor-isolation.mdx"
+  },
+  {
+    "old": "https://tech-note-opal.vercel.app/tech-note/articles/swiftui/layout/swiftui-ignores-safe-area/",
+    "new": "/notes/swiftui/layout/swiftui-ignores-safe-area/",
+    "source": "articles/swiftui/layout/swiftui-ignores-safe-area.mdx"
+  }
+]

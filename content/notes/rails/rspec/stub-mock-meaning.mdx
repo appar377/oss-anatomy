@@ -1,0 +1,183 @@
+---
+title: "RSpecのallow・receive・have_receivedは何を確かめるのか"
+description: "依存先の応答を設定するallow、呼び出しを事前に期待するreceive、実行後に記録を調べるhave_receivedを、同じ在庫判定の例で比べます。verifying doubleが確認する範囲も整理します。"
+date: 2026-07-01
+tags:
+  - Rails
+  - RSpec
+  - Testing
+  - Mock
+  - Stub
+category: Rails
+level: 1
+articleType: practical
+draft: false
+thumbnail: /images/articles/rails-rspec-stub-mock-meaning.png
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+依存先が必ず3を返すように設定して、テストを通しても意味はあるのでしょうか。テスト対象まで3を返すように変えたのなら、確かめられることはほとんどありません。一方、在庫数を読む部分だけを置き換えれば、「在庫が3のとき、注文数に応じて正しく判定するか」は実際のコードで確認できます。
+
+RSpecでは、応答を設定することと、呼び出しを検証することを分けて書けます。同じ小さな例で、`allow`、`expect(...).to receive`、`have_received`の違いを見ます。
+
+例の対象はRuby 3.4.4、RSpec 3.13.0、rspec-mocks 3.13.8です。掲載した8例はローカルで実行し、すべて成功しました。商品コードと在庫数は説明用で、DBや外部APIには接続しません。Rubyブロックを上から一つのspecファイルへ並べると、クラス定義から各テストまでつながります。
+
+## どの処理を本物のまま動かすか
+
+在庫を取得する`InventoryReader`と、注文数を満たすか判定する`StockCheck`を分けます。今回は読み取りもHashで実装しています。短く副作用がないので、この実装をそのまま使うテストも書けます。
+
+```ruby
+require "rspec"
+
+module MockMeaning
+  class InventoryReader
+    def initialize(counts)
+      @counts = counts
+    end
+
+    def count_for(sku:)
+      @counts.fetch(sku)
+    end
+  end
+
+  class StockCheck
+    def initialize(reader:)
+      @reader = reader
+    end
+
+    def available?(sku:, quantity:)
+      unless quantity.is_a?(Integer) && quantity.positive?
+        raise ArgumentError, "quantity must be a positive integer"
+      end
+
+      @reader.count_for(sku: sku) >= quantity
+    end
+  end
+end
+```
+
+```ruby
+RSpec.describe MockMeaning::StockCheck do
+  it "checks the boundary with the real in-memory reader" do
+    reader = MockMeaning::InventoryReader.new("SKU-1" => 3)
+    check = described_class.new(reader: reader)
+    expect(check.available?(sku: "SKU-1", quantity: 3)).to eq(true)
+    expect(check.available?(sku: "SKU-1", quantity: 4)).to eq(false)
+  end
+end
+```
+
+このテストは`InventoryReader#count_for`と数量比較の両方を動かします。在庫と同数ならtrue、一つ多ければfalseです。ただし、Hashを読んでいるだけなので、DBの保存や在庫の同時更新を確認したことにはなりません。
+
+## allowは応答の設定であり、呼び出しの要求ではない
+
+読み取り側を切り離したいときは、同じ判定テストにdoubleを渡せます。`allow(...).to receive(...)`で受け付けるメソッドを設定し、`and_return(3)`でその応答を決めます。[RSpecのallowの説明](https://rspec.info/features/3-13/rspec-mocks/basics/allowing-messages/)でも、これはメッセージを許可する設定として扱われています。
+
+```ruby
+RSpec.describe MockMeaning::StockCheck do
+  it "uses a stub value while executing the real decision" do
+    reader = instance_double(MockMeaning::InventoryReader)
+    allow(reader).to receive(:count_for).with(sku: "SKU-1").and_return(3)
+    check = described_class.new(reader: reader)
+    expect(check.available?(sku: "SKU-1", quantity: 3)).to eq(true)
+    expect(check.available?(sku: "SKU-1", quantity: 4)).to eq(false)
+  end
+
+  it "can leave an allowed message unused when invalid input is rejected first" do
+    reader = instance_double(MockMeaning::InventoryReader)
+    allow(reader).to receive(:count_for).and_return(3)
+    check = described_class.new(reader: reader)
+    expect { check.available?(sku: "SKU-1", quantity: 0) }.to raise_error(ArgumentError)
+    expect(reader).not_to have_received(:count_for)
+  end
+end
+```
+
+最初の例では、doubleが3を返し、`StockCheck`の比較処理は本物のまま動きます。二つ目では、不正な数量を先に拒否するため読み取りません。`allow`だけなら、許可したメソッドが一度も呼ばれなくても、その理由では失敗しません。ここではさらに`not_to have_received`で、呼んでいないことも明示しています。
+
+また、許可したメソッドの戻り値を指定しなければ、通常はnilです。元の実装が整数を返していても、自動で同じ型にはなりません。
+
+```ruby
+RSpec.describe MockMeaning::StockCheck do
+  it "does not infer an integer return value from the real implementation" do
+    reader = instance_double(MockMeaning::InventoryReader)
+    allow(reader).to receive(:count_for)
+    expect(reader.count_for(sku: "SKU-1")).to be_nil
+  end
+end
+```
+
+戻り値だけでなく、例外も設定できます。次は依存先の`KeyError`を呼び出し元へ伝えることを確かめています。このアプリケーションでは、取得失敗を「在庫なし」のfalseへ変換しない契約です。[and_raise](https://rspec.info/features/3-13/rspec-mocks/configuring-responses/raising-an-error/)による例外の発生は、実際の障害を起こすためのものではありません。
+
+```ruby
+RSpec.describe MockMeaning::StockCheck do
+  it "propagates a configured dependency error instead of reporting no stock" do
+    reader = instance_double(MockMeaning::InventoryReader)
+    allow(reader).to receive(:count_for).and_raise(KeyError, "unknown SKU")
+    check = described_class.new(reader: reader)
+    expect { check.available?(sku: "SKU-X", quantity: 1) }.to raise_error(KeyError, "unknown SKU")
+  end
+end
+```
+
+## expect(...).to receiveは実行前に呼び出しを期待する
+
+「この商品コードで一度問い合わせる」ことまで確認するなら、実行前にメッセージの期待を置きます。応答は同じように設定できます。
+
+```ruby
+RSpec.describe MockMeaning::StockCheck do
+  it "expects one request with the product key before execution" do
+    reader = instance_double(MockMeaning::InventoryReader)
+    expect(reader).to receive(:count_for).with(sku: "SKU-1").once.and_return(3)
+    check = described_class.new(reader: reader)
+    expect(check.available?(sku: "SKU-1", quantity: 2)).to eq(true)
+  end
+end
+```
+
+`.with`は引数、`.once`は呼び出し回数を指定しています。期待した呼び出しがない場合、[RSpecはexample終了時の検証で失敗にします](https://rspec.info/features/3-13/rspec-mocks/basics/expecting-messages/)。この例から`available?`の実行を取り除けば、在庫照会の期待は満たせません。
+
+ただし、回数が仕様でなければ毎回固定する必要はありません。在庫判定の結果だけが関心事なら、前の戻り値を確かめるテストで十分な場合もあります。実装の全メソッドを順番どおりに呼ぶことまで期待すると、同じ結果を返す変更にもテストが反応します。
+
+## have_receivedは実行後に記録を調べる
+
+期待を最後にまとめたい場合は、先に記録できるように設定してから実行し、`have_received`で調べます。
+
+```ruby
+RSpec.describe MockMeaning::StockCheck do
+  it "checks a recorded request after execution" do
+    reader = instance_double(MockMeaning::InventoryReader)
+    allow(reader).to receive(:count_for).and_return(3)
+    check = described_class.new(reader: reader)
+    check.available?(sku: "SKU-1", quantity: 2)
+    expect(reader).to have_received(:count_for).with(sku: "SKU-1").once
+  end
+end
+```
+
+この例では`allow`で設定したメソッドの呼び出しが記録されます。実行後に初めて`allow`を置いても、過去の呼び出しは復元できません。RSpecには`spy`や`instance_spy`もありますが、ここでは通常のverifying doubleに記録対象を明示しています。
+
+[spyの公式説明](https://rspec.info/features/3-13/rspec-mocks/basics/spies/)には、受け取った引数が後から変更されると、`have_received(...).with(...)`が適切に照合できない場合があるとの注意もあります。渡したHashやStringを後で変更する例では、呼び出し時点の値が独立して保存されると考えないようにします。
+
+## instance_doubleで分かる間違いと、分からない間違い
+
+`instance_double(MockMeaning::InventoryReader)`は、読み込み済みのクラスを参照しています。[instance double](https://rspec.info/features/3-13/rspec-mocks/verifying-doubles/instance-doubles/)は、設定するメソッドが存在するか、受け付ける引数の形が合うかを確認します。
+
+```ruby
+RSpec.describe MockMeaning::StockCheck do
+  it "rejects nonexistent methods and unsupported keyword arguments" do
+    reader = instance_double(MockMeaning::InventoryReader)
+    expect { allow(reader).to receive(:count_typo) }.to raise_error(RSpec::Mocks::MockExpectationError)
+    allow(reader).to receive(:count_for).and_return(3)
+    expect { reader.count_for(product: "SKU-1") }.to raise_error(ArgumentError)
+  end
+end
+```
+
+この例は、存在しないメソッド名と、誤ったキーワード引数を検出することを期待しています。文字列のクラス名を渡し、そのクラスを読み込まないまま使う場合は同じ検査が有効にならないことがあるため、ここではクラス定数を渡しています。
+
+この検査があっても、「実際の在庫が3である」「元のメソッドもnilを返す」「DBから正しく読める」とは分かりません。verifying doubleは実装の結果や戻り値の型まで検証する仕組みではありません。
+
+この例で確認する対象は、与えられた在庫数に対する判断と、指定した読み取り先とのやり取りです。実際の保存や外部サービスとの接続が要件に含まれるなら、その境界を動かす別の検証が必要です。複数の操作で状態が変わる依存先を置き換える場合は、[Stub・Mock・Fakeの選び方](/notes/rails/rspec/stub-mock-fake-by-purpose/)で続きを扱います。

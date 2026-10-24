@@ -1,0 +1,336 @@
+---
+title: "FlutterからSwiftUIへ移るとき、状態と非同期処理をどう考えるか"
+description: "カウンターとキャンセル可能な取得処理を使い、StateとObservation、Viewのidentity、NavigationStack、画面に関連付けたtaskの違いを整理します。"
+date: 2026-07-20
+tags:
+  - "Flutter"
+  - "SwiftUI"
+  - "Comparison"
+  - "State Management"
+  - "Navigation"
+category: "Flutter"
+level: 2
+articleType: reference
+draft: false
+thumbnail: "/images/articles/flutter-engineer-learning-swiftui.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+Flutterで宣言的UIを書いていても、`StatefulWidget`を`@State`に、Riverpodを`@Observable`に置き換えるだけではSwiftUIの設計は決まりません。まず、状態を誰が持つか、同じ画面を何で識別するか、非同期処理が不要になったときに誰が止めるかを確かめます。
+
+ここではカウンターと説明用のデータ取得を使います。SwiftUI側はObservationを使うiOS 17 / macOS 14以降の例です。Flutter側はカウンターの状態更新の比較に絞り、画面全体の機能を一対一にそろえる目的ではありません。
+
+## setStateしていた値を、SwiftUIでは誰が持ちますか？
+
+Flutterでは、次のように`State`がカウンター値を持ち、`setState`の中で値を変えます。Widgetの設定と、対応する`State`の寿命は別に扱います。[Flutter: State](https://api.flutter.dev/flutter/widgets/State-class.html)
+
+```dart file=learning/counter.dart
+import 'package:flutter/material.dart';
+
+void main() => runApp(const MaterialApp(home: CounterPage()));
+
+class CounterPage extends StatefulWidget {
+  const CounterPage({super.key});
+
+  @override
+  State<CounterPage> createState() => _CounterPageState();
+}
+
+class _CounterPageState extends State<CounterPage> {
+  int count = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('カウンター')),
+      body: Column(
+        children: [
+          Text('値: $count'),
+          TextButton(
+            onPressed: () => setState(() => count += 1),
+            child: const Text('増やす'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+SwiftUI側では、値と操作を次のモデルにまとめます。`@Observable`はプロパティへのアクセスと変更を観測できるようにする仕組みで、`@MainActor`はこのモデルの隔離を表します。どちらか一方で両方の役割を満たすわけではありません。
+
+```swift file=learning/CounterModel.swift
+import Observation
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+@Observable
+final class CounterModel {
+    var title = "カウンター"
+    private(set) var count = 0
+
+    func increment() {
+        count += 1
+    }
+}
+```
+
+画面の所有するモデルを`@State`に置きます。子Viewは同じモデルを受け取り、入力欄へ書き戻すために`@Bindable`を使います。
+
+```swift file=learning/CounterScreen.swift
+import SwiftUI
+
+enum CounterRoute: Hashable {
+    case detail
+}
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+struct CounterScreen: View {
+    @State private var model = CounterModel()
+
+    var body: some View {
+        NavigationStack {
+            CounterControls(model: model)
+                .navigationTitle(model.title)
+                .navigationDestination(for: CounterRoute.self) { route in
+                    switch route {
+                    case .detail:
+                        Text("現在の値: \(model.count)")
+                    }
+                }
+        }
+    }
+}
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+struct CounterControls: View {
+    @Bindable var model: CounterModel
+
+    var body: some View {
+        Form {
+            TextField("題名", text: $model.title)
+            Text("値: \(model.count)")
+            Button("増やす") {
+                model.increment()
+            }
+            NavigationLink("詳細", value: CounterRoute.detail)
+        }
+    }
+}
+```
+
+この構成では、`CounterScreen`が保持するモデルを`CounterControls`も参照します。`@Bindable`を付けたから別のモデルが生成されるわけではありません。SwiftUIは`body`の評価時に参照したObservableのプロパティを追跡し、その変更を更新につなげます。`@State`による保持と、`@Bindable`によるBindingの提供を分けて考えます。[Apple: Discover Observation in SwiftUI](https://developer.apple.com/videos/play/wwdc2023/10149/)
+
+`TextField`の`text:`には読み書きの窓口である`Binding<String>`を渡します。次は、単なる`String`を渡した場合の診断を確認するための別ファイルです。
+
+```swift expected-diagnostic file=expected-diagnostics/MissingBinding.swift
+import SwiftUI
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+struct MissingBinding: View {
+    let model: CounterModel
+
+    var body: some View {
+        TextField("題名", text: model.title)
+    }
+}
+```
+
+`CounterModel.swift`と組み合わせてtypecheckし、`model.title`の型が必要なBindingと異なることを確かめます。値を表示する`Text`と、編集する`TextField`では必要な引数が違います。
+
+RiverpodのProviderは、値のキャッシュや共有、依存関係の再評価なども扱います。SwiftUIの`@State`、Observation、Environmentをどの範囲で使うかを、Provider名の対応だけでは決められません。モデルを画面で所有するのか、上位から渡すのかを先に決めます。[Riverpod: Providers](https://riverpod.dev/docs/concepts2/providers)
+
+既存の`ObservableObject`のコードを読む場合は、`@StateObject`や`@ObservedObject`の設計も残っています。この例はObservationを採用した構成なので、両方の方式のproperty wrapperを混ぜて置き換えていません。
+
+## Viewのstructが作り直されたら、状態も初期化されますか？
+
+SwiftUIのViewの値と、そのViewのidentityに結び付いた状態の寿命は別です。`body`が再評価されたという理由だけで、`@State`が毎回初期値へ戻るわけではありません。一方、Viewのidentityが変われば、状態の寿命も変わり得ます。[Apple: Demystify SwiftUI](https://developer.apple.com/videos/play/wwdc2021/10022/)
+
+Flutterでも新しいWidgetのインスタンスを渡しただけで、常に`State`を作り直すわけではありません。既存のElementを更新できるかは`runtimeType`と`key`の一致で判断されます。[Flutter: Widget.canUpdate](https://api.flutter.dev/flutter/widgets/Widget/canUpdate.html)
+
+この比較で注意したいのは次の点です。
+
+- Flutterの`const`コンストラクタは定数を作るための仕組みです。Swiftの`struct`であることを、そのまま`const`と同じ意味にはできません。[Dart: Constant constructors](https://dart.dev/language/constructors#constant-constructors)
+- SwiftUIで分岐によってViewの構造を変えたり、`.id`を変えたりすると、状態の継続に影響します。
+- `ForEach`の識別子には、同じデータを同じものとして追える値を使います。表示の再計算のたびに新しいUUIDを作ると、その対応を失います。
+
+これらはViewのidentityの話です。後述のCLIで別の`CounterModel`が別の値を持つことを確かめても、SwiftUIが画面上で状態を保持したことの検証にはなりません。
+
+## 画面遷移はNavigator.pushと同じ書き方ですか？
+
+カウンター例の`NavigationLink`は、遷移先のViewを直接生成する代わりに`CounterRoute.detail`という値を渡しています。`navigationDestination`がその型に対応するViewを決めます。遷移経路をアプリ側で管理する必要があれば、`NavigationStack`のpathを状態として扱う構成へ進めます。[Apple: The SwiftUI cookbook for navigation](https://developer.apple.com/videos/play/wwdc2022/10054/)
+
+FlutterのNavigatorにも、`push`などの操作で履歴を変える使い方と、pagesを使う宣言的な構成があります。「Flutterは常に命令的、SwiftUIは常に宣言的」と分けると、状態をどこで管理しているかを見落とします。[Flutter: Navigator](https://api.flutter.dev/flutter/widgets/Navigator-class.html)
+
+この例は値から詳細画面を選ぶところまでです。ディープリンク、状態復元、複数タブをまたぐ経路は実装していません。
+
+## async処理は、画面が消えれば自動で全部止まりますか？
+
+SwiftUIの`.task(id:)`はViewに処理を関連付け、idの変更時には前のタスクをキャンセルして作り直します。Viewが消えた場合にも、完了前のタスクがキャンセルされる仕組みがあります。ただしSwiftのキャンセルは協調的です。キャンセルされたという通知だけで、任意の処理が即座に終了するわけではありません。[Apple: View.task](https://developer.apple.com/documentation/swiftui/view/task(id:name:priority:file:line:_:)), [SE-0304: Structured concurrency](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0304-structured-concurrency.md)
+
+次のモデルは、取得関数を引数として受け取ります。結果が返った後、状態へ書く前にキャンセルを確かめます。画面の値を変更する処理は`MainActor`に隔離しています。
+
+```swift file=learning/TitleModel.swift
+import Observation
+
+typealias TitleFetcher = @Sendable (String) async throws -> String
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+@Observable
+final class TitleModel {
+    private(set) var title = "未取得"
+
+    func load(id: String, fetch: TitleFetcher) async {
+        do {
+            let nextTitle = try await fetch(id)
+            try Task.checkCancellation()
+            title = nextTitle
+        } catch {
+            guard !Task.isCancelled else { return }
+            title = "取得失敗"
+        }
+    }
+}
+```
+
+画面側は、取得対象のIDをタスクのidにします。`TitleExample`の取得関数は説明用の文字列を返すだけで、ネットワーク通信をしません。
+
+```swift file=learning/TitleScreen.swift
+import SwiftUI
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+struct TitleScreen: View {
+    let itemID: String
+    let fetch: TitleFetcher
+    @State private var model = TitleModel()
+
+    var body: some View {
+        Text(model.title)
+            .task(id: itemID) {
+                await model.load(id: itemID, fetch: fetch)
+            }
+    }
+}
+
+@available(iOS 17.0, macOS 14.0, *)
+@MainActor
+struct TitleExample: View {
+    var body: some View {
+        TitleScreen(itemID: "sample") { id in
+            "説明用: \(id)"
+        }
+    }
+}
+```
+
+`Task.checkCancellation()`が必要なのは、取得関数がキャンセルを無視して遅れて結果を返す場合も考えているためです。失敗時にもキャンセル済みなら表示を書き換えません。
+
+ただし、このモデルに任意の場所から同時に`load`を呼ぶだけでは、「新しい呼び出しが必ず勝つ」とは限りません。古い処理を呼び出し側がキャンセルするという契約の例です。キャンセルしない複数要求を扱うなら、世代番号などを使った別の整合性の設計が必要です。
+
+Flutterの`dispose`とSwiftUIの`onDisappear`も、そのまま対応させません。`State.dispose`はそのStateの寿命の終了ですが、Viewが見えなくなることは再表示がないという保証ではありません。Flutterで`mounted`を確かめることも、進行中の処理そのもののキャンセルとは別です。[Flutter: State.dispose](https://api.flutter.dev/flutter/widgets/State/dispose.html), [Flutter: State.setState](https://api.flutter.dev/flutter/widgets/State/setState.html)
+
+## キャンセル後の結果を、待ち時間に依存せず確かめるには？
+
+確認用の取得元を用意し、処理が開始したことを待ってからキャンセルし、その後で結果を返します。次は一度だけ呼び出すためのテスト用actorです。キャンセルを意図的に無視します。本番の通信層を模した完全な実装ではありません。
+
+```swift file=learning/ControlledTitleSource.swift
+// A single-request test source that deliberately does not honor cancellation.
+actor ControlledTitleSource {
+    private var pending: CheckedContinuation<String, Never>?
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func fetch() async -> String {
+        precondition(!started)
+        return await withCheckedContinuation { continuation in
+            pending = continuation
+            started = true
+            for waiter in startWaiters { waiter.resume() }
+            startWaiters.removeAll()
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func complete(_ value: String) {
+        precondition(pending != nil)
+        let continuation = pending
+        pending = nil
+        continuation?.resume(returning: value)
+    }
+}
+```
+
+次の入口で、カウンターの更新、別モデルの初期状態、取得成功、キャンセル後の遅い結果、通常のエラーを確認します。正常CLIのソースは`CounterModel.swift`、`TitleModel.swift`、`ControlledTitleSource.swift`、`Checks.swift`の4ファイルです。
+
+```swift file=learning/Checks.swift
+enum ExampleFetchError: Error {
+    case unavailable
+}
+
+@main
+struct LearningChecks {
+    @MainActor
+    static func main() async {
+        let counter = CounterModel()
+        counter.increment()
+        counter.increment()
+        precondition(counter.count == 2)
+        counter.title = "変更後"
+        precondition(counter.title == "変更後")
+        print("CHECK counter=count_2_and_editable_title")
+
+        let otherCounter = CounterModel()
+        precondition(otherCounter.count == 0)
+        print("CHECK counter=separate_model_has_separate_state")
+
+        let model = TitleModel()
+        await model.load(id: "A") { id in "Title \(id)" }
+        precondition(model.title == "Title A")
+        print("CHECK loading=success_commits_title")
+
+        let source = ControlledTitleSource()
+        let oldTask = Task { @MainActor in
+            await model.load(id: "old") { _ in await source.fetch() }
+        }
+        await source.waitUntilStarted()
+        oldTask.cancel()
+        await source.complete("Late title")
+        await oldTask.value
+        precondition(model.title == "Title A")
+        print("CHECK loading=cancelled_late_result_not_committed")
+
+        await model.load(id: "failure") { _ in
+            throw ExampleFetchError.unavailable
+        }
+        precondition(model.title == "取得失敗")
+        print("CHECK loading=non_cancelled_error_reported")
+    }
+}
+```
+
+この条件で実行し、次の5行が出力されることを確認しました。
+
+```text
+CHECK counter=count_2_and_editable_title
+CHECK counter=separate_model_has_separate_state
+CHECK loading=success_commits_title
+CHECK loading=cancelled_late_result_not_committed
+CHECK loading=non_cancelled_error_reported
+```
+
+Swiftの検証前提はApple Swift 6.3.3、macOS SDK 26.5、deployment target `arm64-apple-macosx26.0`です。言語モード6、strict concurrencyはcomplete、既定の隔離はnonisolated、`NonisolatedNonsendingByDefault`を有効にしました。モデルのCLI 5項目とViewのtypecheckに成功し、`String`を`Binding<String>`へ渡した別例は意図した型エラーになることを確認しました。Dartの比較前提は3.11.5ですが、Flutter SDKの版はここでは固定できておらず、Dart・Flutterとも未実行です。
+
+この確認だけでは、再表示時の`@State`の保持、入力欄の編集、NavigationStackの遷移、`.task(id:)`の画面ライフサイクルは実証できません。Simulator・実機でのUI確認は行っていません。隔離を詳しく追う場合は[Swiftのnonisolated](/notes/swift/concurrency/swift-nonisolated-actor-isolation/)、背景と入力領域の配置は[ignoresSafeAreaの適用先](/notes/swiftui/layout/swiftui-ignores-safe-area/)へ進めます。

@@ -1,0 +1,164 @@
+---
+title: "Railsのwith_lockでafter_commitの通知条件がfalseになるのはなぜか"
+description: "更新後の同じインスタンスへwith_lockを呼ぶと、reloadで保存済み差分が消える。コールバック実行と通知条件を分けて再現し、ロック取得後に更新する順序へ直します。"
+date: 2026-07-20
+tags:
+  - "Rails"
+  - "ActiveRecord"
+  - "Dirty Tracking"
+  - "with_lock"
+  - "after_commit"
+category: "Rails"
+level: 3
+articleType: internal
+draft: false
+thumbnail: "/images/articles/with-lock-dirty-tracking-after-commit.png"
+popular: false
+updated: 2026-10-02
+editorialProfile: question-led-v1
+---
+
+更新した行はDBに残っているのに、`after_commit`からの通知だけが作られない。その原因の一つが、更新後の同じインスタンスへ`with_lock`を呼ぶ順序です。ロック取得時の再読み込みで保存済みの差分が消え、後で評価される`saved_change_to_status?`が`false`になることがあります。
+
+再現には外側のトランザクションを明示します。`after_commit`の処理に到達したかと、変更条件を通って通知処理へ進んだかを別々に記録すると、原因を切り分けられます。
+
+以下は説明用の例です。Ruby 3.4.4、Active Record 8.1.3、pg 1.6.3、PostgreSQL 17.10の専用ローカルDBで、再現・修正・トランザクション境界などの7例をRSpecで確認しています。`lock_dirty_orders`には`status:string`を用意します。値は合成データで、使い捨てのローカルDBで扱います。
+
+## コールバックの実行と通知条件の通過を分ける
+
+検証用モデルでは、二つの`after_commit`を登録します。`attempts`は更新のコミット時に無条件で記録し、`deliveries`は`saved_change_to_status?`が`true`の場合だけ記録します。
+
+```ruby
+class LockDirtyOrder < ActiveRecord::Base
+  self.table_name = "lock_dirty_orders"
+
+  class_attribute :attempts, default: []
+  class_attribute :deliveries, default: []
+
+  after_commit :record_commit, on: :update
+  after_commit :record_delivery, on: :update, if: :saved_change_to_status?
+
+  def ship_under_lock!
+    with_lock do
+      next false unless status == "pending"
+
+      update!(status: "shipped")
+    end
+  end
+
+  private
+
+  def record_commit
+    self.class.attempts << {
+      id: id,
+      changed: saved_change_to_status?,
+      changes: saved_changes.deep_dup
+    }
+  end
+
+  def record_delivery
+    self.class.deliveries << id
+  end
+end
+```
+
+配列は、この例で経路と回数を見るための記録先です。実際の通知送信やジョブ投入は行いません。また、並列処理用のログや永続的な監査記録として使うものでもありません。`ship_under_lock!`は、後で比較する修正版の処理です。
+
+`on: :update`により、初期レコードを作成した際のコミットは計数しません。実際のコードがメソッド内の`return unless saved_change_to_status?`で分岐している場合も、その直前と直後を区別して確認します。
+
+## 同じインスタンスを更新してからロックするとどうなるか
+
+まず、問題になる順序で呼びます。期待値のコメントでは、保存後の差分と各記録を分けています。
+
+```ruby
+LockDirtyOrder.attempts = []
+LockDirtyOrder.deliveries = []
+order = LockDirtyOrder.create!(status: "pending").reload
+before_lock = nil
+after_lock = nil
+
+LockDirtyOrder.transaction do
+  order.update!(status: "shipped")
+  before_lock = [order.saved_change_to_status?, order.saved_changes.deep_dup]
+
+  order.with_lock do
+    after_lock = [order.saved_change_to_status?, order.saved_changes.deep_dup]
+  end
+end
+
+before_lock # => [true, {"status"=>["pending", "shipped"]}]
+after_lock  # => [false, {}]
+LockDirtyOrder.attempts
+# => [{id: order.id, changed: false, changes: {}}]
+LockDirtyOrder.deliveries # => []
+LockDirtyOrder.find(order.id).status # => "shipped"
+```
+
+この結果では、無条件のコミット記録が一つあります。一方、通知条件付きの記録はありません。`after_commit`全体が実行されなかったのではなく、通知側の条件が成立しなかったと読み取れます。
+
+外側の`transaction`があるため、`update!`の直後にはまだコミットしません。既定の`with_lock`もそのトランザクションへ参加し、最後のコミットまでの間に同じオブジェクトを読み直します。[Railsのトランザクションとafter_commit](https://api.rubyonrails.org/v8.1.3/classes/ActiveRecord/Transactions/ClassMethods.html)
+
+外側のトランザクションがなければ、この並びは同じ結果になりません。独立した`update!`が正常にコミットした時点で条件が評価され、その後の`with_lock`は、すでに完了した通知側の処理を取り消しません。
+
+## with_lockは、ロックだけを追加する処理ではない
+
+Rails 8.1.3の`with_lock`は、トランザクション内で`lock!`を呼んでからブロックを実行します。保存済みレコードへの`lock!`は、要求したロックを付けて`reload`します。[Rails 8.1.3の悲観的ロックAPI](https://api.rubyonrails.org/v8.1.3/classes/ActiveRecord/Locking/Pessimistic.html)
+
+PostgreSQLでは、そのロック付き読み込みに`SELECT ... FOR UPDATE`を使います。修正版の実行時に捕捉した対象テーブルのSQLは、次の順でした。値はprepared statementの引数です。
+
+```sql
+SELECT "lock_dirty_orders".* FROM "lock_dirty_orders" WHERE "lock_dirty_orders"."id" = $1 LIMIT $2 FOR UPDATE
+UPDATE "lock_dirty_orders" SET "status" = $1 WHERE "lock_dirty_orders"."id" = $2
+```
+
+ブロックに入る前にレコードを再読み込みすることが、この問題に関係します。Active RecordのDirtyモジュールは`reload`時に、保存前と直前保存の変更管理状態をどちらも空にします。[Dirtyのreload実装](https://github.com/rails/rails/blob/v8.1.3/activerecord/lib/active_record/attribute_methods/dirty.rb#L57-L63)
+
+SQL上の行ロックと、Rubyインスタンスが持っている保存済み差分は別の状態です。DBから`status = "shipped"`を再取得できても、「直前にpendingからshippedへ変えた」という差分が復元されるわけではありません。差分の寿命は[Dirty Trackingのライフサイクル](/notes/rails/active_record/active-record-dirty-tracking-lifecycle/)で詳しく扱っています。
+
+## ロック取得後に読み、判断してから更新する
+
+モデルに用意した`ship_under_lock!`は、先に`with_lock`へ入ります。ロックと再読み込みが終わった後の`status`を見て、`pending`なら更新します。ロック前に読んだ状態を根拠に、更新するかどうかを決めない順序です。
+
+```ruby
+LockDirtyOrder.attempts = []
+LockDirtyOrder.deliveries = []
+order = LockDirtyOrder.create!(status: "pending").reload
+
+order.ship_under_lock!
+
+LockDirtyOrder.attempts
+# => [{id: order.id, changed: true,
+#      changes: {"status"=>["pending", "shipped"]}}]
+LockDirtyOrder.deliveries # => [order.id]
+```
+
+この経路では、ロック取得時の再読み込みより後に保存します。続けて同じオブジェクトを再保存したり`reload`したりしなければ、コミット時の通知条件で今回の差分を参照できます。
+
+PostgreSQLの`FOR UPDATE`は、取得した行に対する他トランザクションの競合する更新やロックを待たせます。ロックを持った状態で判断と更新を行う理由もここにあります。[PostgreSQL 17の行ロック](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS)
+
+すでに未保存の変更があるインスタンスへ`with_lock`を呼ぶ方法は使えません。Rails 8.1.3の`lock!`はその状態を拒否します。「先に値を代入し、ロックの内側で保存する」形へ移すだけでは修正にならないため、値の代入もロック取得後に行います。[lock!の未保存変更チェック](https://github.com/rails/rails/blob/v8.1.3/activerecord/lib/active_record/locking/pessimistic.rb#L67-L85)
+
+## 何をテストすれば、同じ不具合を捉えられるか
+
+DBの最終値だけでは、この不具合を検出できません。問題のある順序でも`status`は更新されているためです。差分を参照する時点、コミットの実行記録、通知条件を通った記録をそれぞれ確認します。
+
+次は`RSpec.describe LockDirtyOrder`の中へ置く例です。各例の前に二つの配列を空にし、`pending_order`は`pending`の行を作成して`reload`するヘルパーとします。
+
+```ruby
+it "defers corrected-flow callbacks to the enclosing transaction commit" do
+  order = pending_order
+
+  LockDirtyOrder.transaction do
+    order.ship_under_lock!
+    expect(LockDirtyOrder.attempts).to eq([])
+    expect(LockDirtyOrder.deliveries).to eq([])
+  end
+
+  expect(LockDirtyOrder.attempts.length).to eq(1)
+  expect(LockDirtyOrder.deliveries).to eq([order.id])
+end
+```
+
+修正版に外側のトランザクションを加えても、通知側へ進むのは外側がコミットした後です。ロールバックした場合は両方の配列が空のままであることも、別の例で確認します。テスト全体をトランザクションで囲む設定を使う場合は、実際にどこでコミットされるかにも注意が必要です。
+
+ここで数えているのは、モデルの処理が通知側へ一度進むことです。ジョブの配送、再試行、受信側の重複排除まで保証するものではありません。更新と通知の責務を分けたい場合や、別インスタンスを使う場合の設計は、[ロックと通知をどう組み合わせるか](/notes/rails/active_record/with-lock-after-commit-dirty-tracking/)へ続きます。
